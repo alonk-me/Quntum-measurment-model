@@ -9,7 +9,7 @@ purely due to the backaction of the measurement.  The model and
 notation follow the discussion in Appendix A of Turkeshi et al.
 ("Measurement‑Induced Entanglement Transitions in the Quantum Ising
 Chain") and the Arrow of Time paper, which analyse continuous
-measurements and stochastic Schrödinger equations【506720724042369†L78-L86】.  Here we work in discrete
+measurements and stochastic Schrödinger equations.  Here we work in discrete
 time with two diagonal Kraus operators to model the weak measurement.
 
 Measurement model
@@ -34,7 +34,7 @@ The probability of applying :math:`M_0` is given by Born’s rule
    P_0 = \|M_0 |\psi\rangle\|^2 = \frac{(a\alpha)^2 + \beta^2}{1 + a^2},
 
 and the probability of applying :math:`M_1` is :math:`P_1=1-P_0`
-【250818000432915†L491-L500】.  Conditional on the outcome, the state is updated and
+.Conditional on the outcome, the state is updated and
 normalised:
 
 .. math::
@@ -107,7 +107,7 @@ from typing import List, Tuple, Sequence, Optional
 import matplotlib.pyplot as plt
 from math import exp, sqrt, cosh, pi
 from scipy.optimize import curve_fit
-
+from tqdm import tqdm
 
 @dataclass
 class TrajectoryResult:
@@ -213,7 +213,8 @@ def run_trajectory(N: int, epsilon: float, rng: Optional[np.random.Generator] = 
         alpha, beta = new_alpha, new_beta
 
     # compute entropy production
-    Q = 2.0 * float(np.sum(np.array(outcomes, dtype=float) * np.array(z_avgs)))
+    Q = 2.0 * epsilon * float(np.sum(np.array(outcomes, dtype=float) * np.array(z_avgs)))
+
 
     return TrajectoryResult(outcomes, z_avgs, Q, zs_before, zs_after)
 
@@ -239,7 +240,8 @@ def simulate_Q_distribution(num_traj: int, N: int, epsilon: float, seed: Optiona
     """
     rng = np.random.default_rng(seed)
     Q_values = np.empty(num_traj, dtype=float)
-    for i in range(num_traj):
+    for i in tqdm(range(num_traj)):
+
         res = run_trajectory(N, epsilon, rng)
         Q_values[i] = res.Q
     return Q_values
@@ -275,10 +277,10 @@ def eq14_pdf(x: np.ndarray, theta: float) -> np.ndarray:
     if theta <= 0:
         return np.zeros_like(x)
     # compute pdf
-    prefactor_1 = 1.0 / np.sqrt(2.0 * pi * theta)
-    prefactor_2 = np.exp(x)/np.sqrt(np.exp(x) - 1)
-    exponent = -theta/2.0 - ((np.arccosh(np.exp(x/2.0)))**2)/(2*theta)
-    return prefactor_1 *prefactor_2* np.exp(exponent)
+    prefactor1 = 1.0 / np.sqrt(2.0 * pi * theta)
+    prefactor2 = np.exp(x)/np.sqrt(np.exp(x)-1)
+    exponent = -theta/2.0 - (np.arccosh(np.exp(x/2.0)))**2/(theta*2.0)
+    return prefactor1 * prefactor2 * np.exp(exponent)
 
 
 def fit_eq14(Q_values: Sequence[float]) -> Tuple[float, float]:
@@ -350,29 +352,53 @@ def plot_Q_fit(Q_values: Sequence[float], theta_hat: float, filename: str) -> No
     plt.savefig(filename, dpi=300)
     plt.close()
 
+def calculate_theta(num_measurments: int, epsilon: int|float) -> float:
+  r"""Calculate the theta value.
 
-def main() -> None:
-    r"""Run a demonstration of the simulation and print results.
+    Parameters
+    ----------
+    num_measurments : int
+        Number of measurement steps per trajectory.
+    epsilon : int|float
+        Measurement strength parameter.
 
-    Runs a moderate number of trajectories to illustrate the typical Q
-    distribution and performs a fit to Eq. (14).  This function is not
-    called automatically when the module is imported; it is intended
-    for manual execution.
+    Returns
+    -------
+    float
+        The theta value.
     """
-    epsilon = 0.05
-    N = 200
-    num_traj = 5000
-    print(f'Running {num_traj} trajectories with N={N}, epsilon={epsilon}...')
-    Q_vals = simulate_Q_distribution(num_traj, N, epsilon, seed=42)
-    mean_Q = np.mean(Q_vals)
-    std_Q = np.std(Q_vals)
-    print(f'Mean Q = {mean_Q:.3f}, Std Q = {std_Q:.3f}')
-    theta_hat, theta_err = fit_eq14(Q_vals)
-    print(f'Fitted theta = {theta_hat:.3f} ± {theta_err:.3f}')
-    # Save fit plot
-    plot_Q_fit(Q_vals, theta_hat, 'demo_Q_fit.png')
-    print('Saved plot to demo_Q_fit.png')
+  return num_measurments*epsilon**2
 
 
-if __name__ == '__main__':
-    main()
+def average_Q_vs_theta(num_traj: int, num_measurments:list[int],epsilon:list[int|float] , seed: Optional[int] = None):
+  r"""Simulate many Q and return array of mean Q and theta.
+
+    Parameters
+    ----------
+    num_traj : int
+        Number of independent trajectories.
+     num_measurments: list[int]
+        list of number of measurement steps per trajectory.
+    epsilon : list[int|float]
+        Measurement strength parameter
+    seed : int, optional
+        Seed for the random generator to allow reproducibility.
+
+    Returns
+    -------
+    (numpy.ndarray, numpy.ndarray) : mean_Q, theta
+        Array of length ``num_traj`` containing the entropy productions.
+    """
+  if len(num_measurments) != len(epsilon):
+    raise ValueError("num_measurments and epsilon must have the same length")
+  length_of_lists= len(num_measurments)
+  theta_list = []
+  mean_Q_array = []
+  for i in range(length_of_lists):
+    Q_values = simulate_Q_distribution(num_traj, num_measurments[i], epsilon[i], seed)
+    mean_Q = np.mean(np.array(Q_values))
+    mean_Q_array.append(mean_Q)
+    theta = calculate_theta(num_measurments[i], epsilon[i])
+    theta_list.append(theta)
+  return mean_Q_array, theta_list
+
