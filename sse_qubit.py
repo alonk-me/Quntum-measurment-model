@@ -8,7 +8,7 @@ Optionally includes a Hamiltonian H = (omega/2) σ_x to generate precession.
 
 State is represented as a complex vector psi ∈ C^2 with ||psi||=1.
 Measurement operator: L = sqrt(gamma) * sigma_z.
-d|psi> = [ -i H dt - 0.5 L^\dagger L dt + ( <L+L^\dagger>/2 * I - L ) dW ] |psi>   (common forms vary)
+d|psi> = [ -i H dt - 0.5 L^dagger L dt + ( <L+L^dagger>/2 * I - L ) dW ] |psi>   (common forms vary)
 Here we use the familiar weak-measurement Itô SSE for Hermitian measured operator A=σ_z:
 
 d|psi> = [ -i H dt - (gamma/2)(sigma_z^2 - <sigma_z> sigma_z) dt + sqrt(gamma) (sigma_z - <sigma_z>) dW ] |psi>
@@ -20,9 +20,7 @@ Q = sum_t (avg_{midpoint} <sigma_z>) * xi_t
 where dW_t = sqrt(dt) * xi_t and xi_t ~ N(0,1).
 This matches a “symmetric operators / midpoint” convention for entropy production-like observables.
 
-Edit map_epsilon_to_gamma(epsilon, dt) if you have an exact relation from your notes.
 
-Author: ChatGPT
 """
 import numpy as np
 
@@ -46,13 +44,9 @@ def map_epsilon_to_gamma(epsilon, dt):
     continuous measurement rate gamma.
 
     A common weak-measurement scaling is epsilon ~ sqrt(gamma * dt),
-    hence gamma ≈ (epsilon**2) / dt. If your notes introduce a factor,
-    adjust here, e.g., gamma = (epsilon**2) / (c * dt).
-
-    Replace 'c = 1.0' below per your derivation.
+    hence gamma ≈ (epsilon**2) / dt.
     """
-    c = 1.0
-    return (epsilon**2) / (c * dt)
+    return (epsilon**2) / dt
 
 def step_sse(psi, dt, gamma, omega=0.0, rng=None):
     """
@@ -69,7 +63,7 @@ def step_sse(psi, dt, gamma, omega=0.0, rng=None):
     xi = rng.normal(0.0, 1.0)
     dW = np.sqrt(dt) * xi
 
-    # Hamiltonian
+    # TODO: remove Hamiltonian
     H = 0.5 * omega * SIGMA_X
 
     # Drift + diffusion operators
@@ -79,7 +73,7 @@ def step_sse(psi, dt, gamma, omega=0.0, rng=None):
     diff_op = np.sqrt(gamma) * (SIGMA_Z - m_before * IDENT)
 
     # Update: |ψ> + [-i H |ψ> + drift_meas |ψ>] dt + diff_op |ψ> dW
-    psi_next = psi + (-1j * (H @ psi) + drift_meas @ psi) * dt + (diff_op @ psi) * dW
+    psi_next = psi + (drift_meas @ psi) * dt + (diff_op @ psi) * dW
     psi_next = normalize(psi_next)
     m_after  = expval(psi_next, SIGMA_Z)
     return psi_next, xi, m_before, m_after
