@@ -3,23 +3,31 @@
 This project contains a Monte Carlo simulation of a single qubit undergoing repeated weak measurements, as described in the Arrow of Time and related papers. The simulation uses diagonal Kraus operators and tracks the stochastic evolution of the qubit state and entropy production $Q$.
 
 ## Contents
-- `qubit_measurement_simulation.py`: Simulation code and analysis functions
+- `src/quantum_measurements/`: Python package containing the simulation code
 - `qubit_simulation_analysis.ipynb`: Jupyter notebook for running simulations and plotting results
+- `sse_qubit.ipynb`: Notebook exploring the stochastic Schrödinger equation model
 - `requirements.txt`: List of required Python packages
 
 ## Getting Started
 1. Create and activate a Python virtual environment (optional but recommended).
-2. Install dependencies:
+2. Install dependencies and the local package (editable install recommended for development):
    ```
    pip install -r requirements.txt
    ```
-3. Open `qubit_simulation_analysis.ipynb` in Jupyter or VS Code to explore the simulations and results.
+   This installs the `quantum_measurements` package so it can be imported from anywhere in your environment.
+3. Run the command-line interface to generate Monte Carlo statistics (optional):
+   ```
+   python -m quantum_measurements --num-traj 200 --steps 100 --epsilon 0.05 --save-plot results/q_hist.png
+   ```
+   The module prints summary statistics for the entropy production and optionally saves a histogram with the Eq. (14) fit.
+4. Open `qubit_simulation_analysis.ipynb` in Jupyter or VS Code to explore the simulations and results.
 
 ## Requirements
 - Python 3.8+
 - numpy
 - matplotlib
 - scipy
+- tqdm
 
 ## Description
 - Simulates single qubit weak measurement trajectories
