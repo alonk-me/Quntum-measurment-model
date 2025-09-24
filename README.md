@@ -4,7 +4,9 @@ This project contains a Monte Carlo simulation of a single qubit undergoing repe
 
 ## Contents
 - `qubit_measurement_simulation.py`: Simulation code and analysis functions
-- `qubit_simulation_analysis.ipynb`: Jupyter notebook for running simulations and plotting results
+- `notebooks/qubit_simulation_analysis.ipynb`: Jupyter notebook for running simulations and plotting results
+- `notebooks/sse_qubit.ipynb`: Supplemental notebook exploring stochastic Schrödinger equation details
+- `reports/simulation_results.pdf`: Example static output generated from the simulations
 - `requirements.txt`: List of required Python packages
 
 ## Getting Started
@@ -13,7 +15,7 @@ This project contains a Monte Carlo simulation of a single qubit undergoing repe
    ```
    pip install -r requirements.txt
    ```
-3. Open `qubit_simulation_analysis.ipynb` in Jupyter or VS Code to explore the simulations and results.
+3. Open `notebooks/qubit_simulation_analysis.ipynb` in Jupyter or VS Code to explore the simulations and results. Additional exploratory material is available in `notebooks/sse_qubit.ipynb`, and static figures can be found under `reports/`.
 
 ## Requirements
 - Python 3.8+
