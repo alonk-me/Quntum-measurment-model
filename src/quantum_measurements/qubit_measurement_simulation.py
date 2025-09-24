@@ -107,7 +107,14 @@ from typing import List, Tuple, Sequence, Optional
 import matplotlib.pyplot as plt
 from math import exp, sqrt, cosh, pi
 from scipy.optimize import curve_fit
-from tqdm import tqdm
+
+try:  # pragma: no cover - fallback when tqdm is unavailable
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - lightweight fallback
+    def tqdm(iterable, *args, **kwargs):
+        """Fallback progress iterator when :mod:`tqdm` is missing."""
+
+        return iterable
 
 @dataclass
 class TrajectoryResult:
