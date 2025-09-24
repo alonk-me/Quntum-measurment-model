@@ -1,3 +1,16 @@
+Metadata-Version: 2.4
+Name: quantum-measurements
+Version: 0.1.0
+Summary: Monte Carlo simulations for single-qubit weak measurements
+Author: Quantum Measurements Contributors
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Requires-Dist: scipy
+Provides-Extra: progress
+Requires-Dist: tqdm; extra == "progress"
+
 # Single Qubit Weak Measurement Simulation
 
 This project contains a Monte Carlo simulation of a single qubit undergoing repeated weak measurements, as described in the Arrow of Time and related papers. The simulation uses diagonal Kraus operators and tracks the stochastic evolution of the qubit state and entropy production $Q$.

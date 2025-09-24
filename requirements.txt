@@ -1,3 +1,7 @@
+-e .
 numpy
-matplotlib
 scipy
+matplotlib
+jupyter
+# Optional dependency for progress bars during simulations
+tqdm
