@@ -2,7 +2,16 @@
 Module implementing a stochastic Schrödinger equation (SSE) simulator
 for continuously monitored qubit systems.
 
-This module provides a simple class that integrates a single-qubit state
+This module provides a sim        where dξ = ε * xi with ε = sqrt(γ * dt) and xi = ±1 is a discrete
+        measurement outcome. After each update the state is renormalised.
+
+        Parameters
+        ----------
+        psi : np.ndarray
+            Current state vector (2 complex components).
+
+        xi : int
+            Discrete measurement outcome, either +1 or -1.at integrates a single-qubit state
 under the Itô-form stochastic Schrödinger equation for a diffusive
 measurement of the σ_z operator.  The update rule is adapted from the
 continuous measurement formalism of Jacobs and Steck and Turkeshi et al.
@@ -131,7 +140,7 @@ class SingleQubitSSE:
     def _measurement_update(
         self,
         psi: np.ndarray,
-        dW: float,
+        xi: int,
     ) -> np.ndarray:
         """Apply a single Euler–Maruyama step of the SSE to the state.
 
@@ -163,8 +172,10 @@ class SingleQubitSSE:
         expect = np.vdot(psi, self.meas_op @ psi).real
         # measurement operator minus its expectation
         delta_M = self.meas_op - expect * np.eye(2, dtype=complex)
-        # noise term dξ = √γ dW
-        dxi = np.sqrt(self.gamma) * dW
+        # epsilon parameter
+        epsilon = np.sqrt(self.gamma * self.dt)
+        # noise term dξ = ε * xi
+        dxi = epsilon * xi
         # deterministic part: -i H dt - (γ/2)(M - ⟨M⟩)^2 dt
         drift = (-1j * (self.H @ psi)) * self.dt
         drift += -(self.gamma / 2.0) * (delta_M @ (delta_M @ psi)) * self.dt
@@ -178,6 +189,37 @@ class SingleQubitSSE:
     def _bloch_z(self, psi: np.ndarray) -> float:
         """Compute the Bloch z‑coordinate z = ⟨σ_z⟩ for the given state."""
         return float(np.vdot(psi, sigma_z() @ psi).real)
+
+    def _generate_discrete_outcome(self, psi: np.ndarray) -> int:
+        """Generate discrete measurement outcome xi = ±1 with state-dependent probabilities.
+        
+        The probability of getting xi = +1 is p_+1 = 0.5 * (1 + ε * z_psi)
+        where z_psi = ⟨σ_z⟩ and ε = sqrt(γ * dt).
+        
+        Parameters
+        ----------
+        psi : np.ndarray
+            Current state vector.
+            
+        Returns
+        -------
+        xi : int
+            Discrete measurement outcome, either +1 or -1.
+        """
+        epsilon = np.sqrt(self.gamma * self.dt)
+        z_psi = self._bloch_z(psi)
+        
+        # Probability of getting +1
+        p_plus = 0.5 * (1.0 + epsilon * z_psi)
+        
+        # Ensure probability is in valid range [0, 1]
+        p_plus = np.clip(p_plus, 0.0, 1.0)
+        
+        # Generate random outcome
+        if np.random.random() < p_plus:
+            return 1
+        else:
+            return -1
 
     def run_trajectory(
         self,
@@ -208,18 +250,32 @@ class SingleQubitSSE:
         psi = psi0.astype(complex) / np.linalg.norm(psi0)
         z_traj = np.empty(self.N_steps + 1, dtype=float)
         z_traj[0] = self._bloch_z(psi)
+        
+        # Store measurement outcomes for discrete Q calculation
+        xi_outcomes = []
+        epsilon = np.sqrt(self.gamma * self.dt)
         Q = 0.0
+        
         for k in range(self.N_steps):
-            # draw a real Gaussian increment with mean 0 and variance dt
-            dW = np.random.normal(loc=0.0, scale=np.sqrt(self.dt))
+            # generate discrete measurement outcome xi = ±1
+            xi = self._generate_discrete_outcome(psi)
+            xi_outcomes.append(xi)
+            
             # update state
-            psi = self._measurement_update(psi, dW)
+            psi = self._measurement_update(psi, xi)
+            
             # record z
             z = self._bloch_z(psi)
             z_traj[k + 1] = z
-            if compute_entropy:
-                # accumulate Q increment: (2/τ) z dW
-                Q += (2.0 / self.tau) * z * dW
+            
+        if compute_entropy:
+            # Compute Q using discrete formula: 
+            # Q = 2*ε² * Σ(z_i * (z_{i-1} + z_i)/2) + 2*ε * Σ(ξ_i * (z_{i-1} + z_i)/2)
+            for i in range(self.N_steps):
+                z_avg = (z_traj[i] + z_traj[i + 1]) / 2.0
+                Q += 2.0 * epsilon**2 * z_traj[i] * z_avg
+                Q += 2.0 * epsilon * xi_outcomes[i] * z_avg
+                
         return z_traj, Q
 
     def run_ensemble(
