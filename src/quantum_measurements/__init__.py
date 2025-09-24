@@ -1,27 +1,26 @@
-"""Quantum measurement simulation utilities."""
+"""Quantum measurement simulation package."""
 
+from . import entropy, qubit_measurement_simulation, sse_qubit, theory, visualisation
 from .qubit_measurement_simulation import (
-    TrajectoryResult,
-    run_trajectory,
-    simulate_Q_distribution,
-    eq14_pdf,
-    fit_eq14,
-    plot_Q_fit,
-    calculate_theta,
-    average_Q_vs_theta,
+    EnsembleResult,
+    plot_histogram_with_theory,
+    save_ensemble,
+    simulate_ensemble,
+    simulate_trajectory,
 )
-
-from . import qubit_measurement_simulation, sse_qubit
+from .theory import dressel_eq14_pdf
 
 __all__ = [
-    "TrajectoryResult",
-    "run_trajectory",
-    "simulate_Q_distribution",
-    "eq14_pdf",
-    "fit_eq14",
-    "plot_Q_fit",
-    "calculate_theta",
-    "average_Q_vs_theta",
+    "EnsembleResult",
+    "dressel_eq14_pdf",
+    "entropy",
+    "plot_histogram_with_theory",
     "qubit_measurement_simulation",
+    "save_ensemble",
+    "simulate_ensemble",
+    "simulate_trajectory",
     "sse_qubit",
+    "theory",
+    "visualisation",
 ]
+

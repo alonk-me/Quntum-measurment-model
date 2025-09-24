@@ -1,6 +1,11 @@
-# Single Qubit Weak Measurement Simulation
+# Single-Qubit Stochastic Schrödinger Equation Simulation
 
-This project contains a Monte Carlo simulation of a single qubit undergoing repeated weak measurements, as described in the Arrow of Time and related papers. The simulation uses diagonal Kraus operators and tracks the stochastic evolution of the qubit state and entropy production $Q$.
+This project implements the stochastic Schrödinger equation (SSE) for a single
+qubit monitored in $\sigma_z$ using the Stratonovich interpretation.  The
+simulation follows Turkeshi *et al.* and uses symmetric Kraus operators to
+reproduce the continuous-measurement dynamics.  The main observable is the
+trajectory entropy production $Q$ defined in the accompanying SRS, which is
+compared against the analytical distribution of Dressel *et al.* (Eq. 14).
 
 ## Contents
 - `src/quantum_measurements/`: Python package containing the simulation code
@@ -30,9 +35,11 @@ This project contains a Monte Carlo simulation of a single qubit undergoing repe
 - tqdm (optional, for progress bars)
 
 ## Description
-- Simulates single qubit weak measurement trajectories
-- Computes and analyzes entropy production $Q$
-- Compares empirical results to analytical predictions
+- Integrates single-qubit SSE trajectories with symmetric Kraus operators
+- Computes entropy production according to the Stratonovich midpoint rule
+- Generates histograms of $Q$ and overlays the Dressel Eq. (14) prediction with
+  the substitution $\theta = 2N\epsilon$
+- Saves Monte-Carlo data for reproducibility
 
 ## License
 This project is for academic and research use.
