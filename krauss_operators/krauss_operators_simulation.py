@@ -103,41 +103,15 @@ from __future__ import annotations
 
 import numpy as np
 from math import exp, sqrt, cosh, pi, cos, sin
-from dataclasses import dataclass
 from typing import List, Tuple, Sequence, Optional
 import matplotlib.pyplot as plt
-from math import exp, sqrt, cosh, pi
 from scipy.optimize import curve_fit
 from tqdm import tqdm
 
-@dataclass
-class TrajectoryResult:
-    r"""Data class storing the results of a single measurement trajectory.
-
-    Attributes
-    ----------
-    outcomes : list of int
-        Sequence of measurement outcomes :math:`\xi_i \in \{+1,-1\}`.
-    z_averages : list of float
-        Average :math:`\sigma_z` expectation values for each step.
-    Q : float
-        Computed entropy production for the trajectory.
-    zs_before : list of float
-        Expectation values of :math:`\sigma_z` immediately before each
-        measurement.
-    zs_after : list of float
-        Expectation values of :math:`\sigma_z` immediately after each
-        measurement.
-    """
-
-    outcomes: List[int]
-    z_averages: List[float]
-    Q: float
-    zs_before: List[float]
-    zs_after: List[float]
+from datatypes import InitialState, TrajectoryResult
 
 
-def run_trajectory(N: int, epsilon: float, omega_dt: float = 0.0, rng: Optional[np.random.Generator] = None) -> TrajectoryResult:
+def run_trajectory(N: int, epsilon: float, omega_dt: float = 0.0, initial_state: Optional[InitialState] = None, rng: Optional[np.random.Generator] = None) -> TrajectoryResult:
     r"""Simulate a single measurement trajectory with optional Hamiltonian dynamics.
 
     Parameters
@@ -151,6 +125,9 @@ def run_trajectory(N: int, epsilon: float, omega_dt: float = 0.0, rng: Optional[
         rotates by an angle ``dt*omega/2`` before each measurement.  The
         default ``0.0`` reproduces the original dynamics without
         Hamiltonian.
+    initial_state : InitialState, optional
+        Initial quantum state specified by alpha and beta amplitudes.
+        If ``None``, defaults to the equatorial state |+⟩ = (|0⟩ + |1⟩)/√2.
     rng : numpy.random.Generator, optional
         Random number generator for reproducibility.  If ``None`` a new
         generator is created.
@@ -172,9 +149,14 @@ def run_trajectory(N: int, epsilon: float, omega_dt: float = 0.0, rng: Optional[
     c = cos(angle)
     s = sin(angle)
 
-    # initial state on equator of Bloch sphere: |psi_0> = (1/sqrt{2}, 1/sqrt{2})
-    alpha = 1.0 / np.sqrt(2.0)
-    beta = 1.0 / np.sqrt(2.0)
+    # set initial state
+    if initial_state is None:
+        # default: equatorial state |+> = (|0> + |1>)/sqrt(2)
+        alpha = 1.0 / np.sqrt(2.0)
+        beta = 1.0 / np.sqrt(2.0)
+    else:
+        # use provided initial state (normalized)
+        alpha, beta = initial_state.normalized()
 
     outcomes: List[int] = []
     z_avgs: List[float] = []
@@ -239,7 +221,7 @@ def run_trajectory(N: int, epsilon: float, omega_dt: float = 0.0, rng: Optional[
     return TrajectoryResult(outcomes, z_avgs, Q, zs_before, zs_after)
 
 
-def simulate_Q_distribution(num_traj: int, N: int, epsilon: float, omega_dt: float = 0.0, seed: Optional[int] = None) -> np.ndarray:
+def simulate_Q_distribution(num_traj: int, N: int, epsilon: float, omega_dt: float = 0.0, initial_state: Optional[InitialState] = None, seed: Optional[int] = None) -> np.ndarray:
     r"""Simulate many trajectories and return array of entropy production values.
 
     Parameters
@@ -255,6 +237,9 @@ def simulate_Q_distribution(num_traj: int, N: int, epsilon: float, omega_dt: flo
         rotates by an angle ``dt*omega/2`` before each measurement.  The
         default ``0.0`` reproduces the original dynamics without
         Hamiltonian.
+    initial_state : InitialState, optional
+        Initial quantum state specified by alpha and beta amplitudes.
+        If ``None``, defaults to the equatorial state |+⟩ = (|0⟩ + |1⟩)/√2.
     seed : int, optional
         Seed for the random generator to allow reproducibility.
 
@@ -267,7 +252,7 @@ def simulate_Q_distribution(num_traj: int, N: int, epsilon: float, omega_dt: flo
     Q_values = np.empty(num_traj, dtype=float)
     for i in tqdm(range(num_traj)):
 
-        res = run_trajectory(N, epsilon, omega_dt, rng)
+        res = run_trajectory(N, epsilon, omega_dt, initial_state, rng)
         Q_values[i] = res.Q
     return Q_values
 
