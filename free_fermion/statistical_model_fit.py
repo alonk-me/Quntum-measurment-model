@@ -18,7 +18,13 @@ from scipy import stats
 from typing import Dict, Any, Tuple
 
 
-def compare_with_analytical(times: np.ndarray, values: np.ndarray, J: float, L: int, show_plot: bool = True) -> Dict[str, Any]:
+def compare_with_analytical(
+        times: np.ndarray,
+        values: np.ndarray,
+        J: float, L: int,
+        show_plot: bool = True,
+        Residuals_plot: bool = False
+        ) -> Dict[str, Any]:
     """Compare numerical results with analytical solution cos(2Jt).
     
     Parameters
@@ -33,6 +39,8 @@ def compare_with_analytical(times: np.ndarray, values: np.ndarray, J: float, L: 
         Chain length for labeling
     show_plot : bool, optional
         Whether to display comparison plots, by default True
+    Residuals_plot : bool, optional
+        Whether to display residuals plot, by default False
         
     Returns
     -------
@@ -46,7 +54,7 @@ def compare_with_analytical(times: np.ndarray, values: np.ndarray, J: float, L: 
         - chi2_reduced: Reduced chi-squared statistic
     """
     # Analytical solution
-    analytical = np.cos(2 * J * times)
+    analytical = 2 + np.cos(2 * J * times)
     
     # Ensure we're working with real values
     numerical_real = values.real if np.iscomplexobj(values) else values
@@ -72,23 +80,23 @@ def compare_with_analytical(times: np.ndarray, values: np.ndarray, J: float, L: 
         
         # Left plot: Overlay comparison
         plt.subplot(1, 2, 1)
-        plt.plot(times, numerical_real, 'b-', label=f'Numerical (L={L})', linewidth=2)
-        plt.plot(times, analytical, 'r--', label=r'Analytical: $\cos(2Jt)$', linewidth=2, alpha=0.8)
+        plt.plot(times, numerical_real, 'b--', label=f'Numerical (L={L})', linewidth=2)
+        plt.plot(times, analytical, 'r-', label=r'Analytical: $\cos(2Jt)$', linewidth=2, alpha=0.8)
         plt.xlabel('Time $t$')
         plt.ylabel(r'$1 + 2\, G_{0,0}(t)$ / $\langle\sigma_1^z(t)\rangle$')
         plt.title(f'Numerical vs Analytical Comparison (L={L})')
         plt.grid(True, alpha=0.3)
         plt.legend()
-        
-        # Right plot: Residuals
-        plt.subplot(1, 2, 2)
-        residuals = numerical_real - analytical
-        plt.plot(times, residuals, 'g-', linewidth=1)
-        plt.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        plt.xlabel('Time $t$')
-        plt.ylabel('Residuals (Numerical - Analytical)')
-        plt.title(f'Residuals (L={L})')
-        plt.grid(True, alpha=0.3)
+        if Residuals_plot:
+            # Right plot: Residuals
+            plt.subplot(1, 2, 2)
+            residuals = numerical_real - analytical
+            plt.plot(times, residuals, 'g-', linewidth=1)
+            plt.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+            plt.xlabel('Time $t$')
+            plt.ylabel('Residuals (Numerical - Analytical)')
+            plt.title(f'Residuals (L={L})')
+            plt.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.show()
