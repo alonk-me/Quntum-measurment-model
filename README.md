@@ -199,7 +199,6 @@ This project implements quantum trajectory theory for single-qubit measurements,
 ### References
 - Dressel et al., "Arrow of Time for Continuous Quantum Measurement"
 - Turkeshi et al., "Measurement-Induced Entanglement Transitions"
-- Jacobs & Steck, "Quantum State Diffusion" formalism
 
 ## Contributing
 
@@ -211,7 +210,7 @@ This project implements quantum trajectory theory for single-qubit measurements,
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License
 
 ## Acknowledgments
 
