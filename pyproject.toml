@@ -7,7 +7,7 @@ name = "quantum-measurements"
 version = "0.1.0"
 description = "Monte Carlo simulations for single-qubit weak measurements"
 readme = "README.md"
-authors = [{name = "Quantum Measurements Contributors"}]
+authors = [{name = "Alon Kochol"}]
 requires-python = ">=3.8"
 dependencies = [
     "numpy",
