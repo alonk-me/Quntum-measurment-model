@@ -1,41 +1,36 @@
-"""
-matrix_commutator_solver.py
-============================
-
-This module provides a simple numerical solver for the matrix differential
-equation
-
-.. math::
-
-    \frac{\mathrm{d}}{\mathrm{d}t} G(t) = -2\mathrm{i}\,[G(t), h],
-
-where ``G`` is a ``2L×2L`` complex matrix, ``h`` is a fixed
-``2L×2L`` matrix composed of four ``L×L`` blocks, and ``[G, h] = Gh - hG``
-is the commutator.  The initial condition at ``t=0`` is a diagonal matrix
-with ``L`` ones followed by ``L`` zeros.
-
-The code below constructs ``h`` as prescribed and integrates the equation
-using a simple forward Euler method.  For small time‐steps the method
-reproduces the exact solution to good accuracy.  A parametric function
-``compute_time_series`` returns both the time grid and the quantity
-``1 + 2 * G[0, 0]`` as a function of time, which for the Ising model
-corresponds to the expectation value of the boundary magnetization in
-the Jordan–Wigner fermionic representation.
-
-Example
--------
-
-The following snippet computes and prints the first few values of
-``1 + 2*G[0, 0]`` for a two‑site chain with ``J=1``:
-
->>> from matrix_commutator_solver import compute_time_series
->>> times, values = compute_time_series(L=2, J=1.0, T=1.0, steps=100)
->>> print(values[:5])
-
-The module can be imported from a Jupyter notebook or used as a script.
-When run as a script it will compute the series for ``L=2`` and ``L=3``
-with default parameters and print a short summary.
-"""
+# matrix_commutator_solver.py
+# ============================
+#
+# This module provides a simple numerical solver for the matrix differential
+# equation
+#
+#     dG/dt = -2i [G(t), h]
+#
+# where G is a 2L×2L complex matrix, h is a fixed 2L×2L matrix composed of
+# four L×L blocks, and [G, h] = Gh - hG is the commutator. The initial
+# condition at t=0 is a diagonal matrix with L ones followed by L zeros.
+#
+# The code below constructs h as prescribed and integrates the equation
+# using a simple forward Euler method. For small time-steps the method
+# reproduces the exact solution to good accuracy. A parametric function
+# compute_time_series returns both the time grid and the quantity
+# 1 + 2 * G[0, 0] as a function of time, which for the Ising model
+# corresponds to the expectation value of the boundary magnetization in
+# the Jordan–Wigner fermionic representation.
+#
+# Example
+# -------
+#
+# The following snippet computes and prints the first few values of
+# 1 + 2*G[0, 0] for a two-site chain with J=1:
+#
+# >>> from matrix_commutator_solver import compute_time_series
+# >>> times, values = compute_time_series(L=2, J=1.0, T=1.0, steps=100)
+# >>> print(values[:5])
+#
+# The module can be imported from a Jupyter notebook or used as a script.
+# When run as a script it will compute the series for L=2 and L=3
+# with default parameters and print a short summary.
 
 from __future__ import annotations
 
