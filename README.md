@@ -111,7 +111,7 @@ print(f"Entropy production Q = {Q_value:.3f}")
 
 ### Kraus Operators Example
 
-```python
+```
 from krauss_operators.krauss_operators_simulation import run_trajectory, simulate_Q_distribution
 from krauss_operators.datatypes import InitialState
 import numpy as np
