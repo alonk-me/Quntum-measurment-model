@@ -113,7 +113,7 @@ class SSEWavefunctionSimulator:
         if abs(self.J) < 1e-15:  # No Hamiltonian evolution
             return psi
         
-        # H = J σ_x, so U = exp(-i J σ_x dt)
+        # H = J σ_x, so U = exp(-i J σ_x dt) #TODO: sigma Y
         # For σ_x: exp(-i θ σ_x) = cos(θ)I - i sin(θ)σ_x  
         theta = self.J * dt
         cos_theta = np.cos(theta)
@@ -145,7 +145,7 @@ class SSEWavefunctionSimulator:
         first_order = xi * self.epsilon * 0.5 * sigma_z_minus_z @ psi
         
         # Second order term: -(ε²/2)(σ_z - z)²/4  
-        second_order_op = -0.5 * (self.epsilon**2) * 0.25 * (sigma_z_minus_z @ sigma_z_minus_z)
+        second_order_op = 0.5 * (self.epsilon**2) * 0.25 * (sigma_z_minus_z @ sigma_z_minus_z)
         second_order = second_order_op @ psi
         
         # Update wavefunction
@@ -197,8 +197,10 @@ class SSEWavefunctionSimulator:
             z_trajectory[i + 1] = z_after
             
             # Accumulate entropy production using discrete Stratonovich formula:
-            # Q = 2ε Σ r_i (z_{i-1} + z_i)/2
-            Q += 2.0 * self.epsilon * xi * (z_before + z_after) / 2.0
+            # Q = 2ε Σ xi_i (z_{i-1} + z_i)/2
+            first_order = 2.0 * self.epsilon * xi * (z_before + z_after) / 2.0
+            second_order = 2.0 *(self.epsilon**2) * z_before * (z_before + z_after) / 2.0
+            Q += first_order + second_order
         
         return Q, z_trajectory, measurement_results
     
