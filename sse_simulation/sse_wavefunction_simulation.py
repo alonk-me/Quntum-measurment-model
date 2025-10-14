@@ -112,14 +112,14 @@ class SSEWavefunctionSimulator:
         """Apply Hamiltonian evolution for time step dt."""
         if abs(self.J) < 1e-15:  # No Hamiltonian evolution
             return psi
-        
-        # H = J σ_x, so U = exp(-i J σ_x dt) #TODO: sigma Y
-        # For σ_x: exp(-i θ σ_x) = cos(θ)I - i sin(θ)σ_x  
+
+        # H = J σ_x, so U = exp(-i J σ_y dt)
+        # For σ_y: exp(-i θ σ_y) = cos(θ)I - i sin(θ)σ_y
         theta = self.J * dt
         cos_theta = np.cos(theta)
         sin_theta = np.sin(theta)
         
-        U = cos_theta * self.identity - 1j * sin_theta * self.sigma_x
+        U = cos_theta * self.identity - 1j * sin_theta * self.sigma_y
         return U @ psi
     
     def _measurement_update(self, psi: np.ndarray) -> Tuple[np.ndarray, int, float]:
@@ -184,15 +184,18 @@ class SSEWavefunctionSimulator:
         Q = 0.0  # Entropy production accumulator
         
         for i in range(self.N_steps):
-            # Apply Hamiltonian evolution (if J ≠ 0)
-            if abs(self.J) > 1e-15:
-                psi = self._apply_hamiltonian_evolution(psi, dt)
+
             
             # Apply measurement
             psi, xi, z_before = self._measurement_update(psi)
+
+            # Apply Hamiltonian evolution (if J ≠ 0)
+            if abs(self.J) > 1e-15:
+                psi = self._apply_hamiltonian_evolution(psi, dt)
+            #save measurement result
             measurement_results[i] = xi
             
-            # Calculate z after measurement
+            # Calculate z after measurement and save
             z_after = self._expectation_value_z(psi)
             z_trajectory[i + 1] = z_after
             
