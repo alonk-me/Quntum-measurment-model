@@ -25,7 +25,110 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import shared_memory
+
+
+def _simulate_trajectory_pure(
+    config: Dict[str, Any],
+    psi_initial: np.ndarray,
+    seed: Optional[int] = None
+) -> Tuple[float, np.ndarray, np.ndarray]:
+    """Pure function version of simulate_trajectory for parallel execution.
+    
+    This is a pure function that takes simple arguments (no class state)
+    and can be pickled for multiprocessing.
+    
+    Parameters:
+    -----------
+    config : dict
+        Configuration dictionary with keys:
+        - 'epsilon': float, measurement strength
+        - 'N_steps': int, number of measurement steps
+        - 'J': float, Hamiltonian coupling parameter
+        - 'sigma_z': np.ndarray, Pauli Z matrix
+        - 'sigma_x': np.ndarray, Pauli X matrix
+        - 'identity': np.ndarray, 2x2 identity matrix
+    psi_initial : np.ndarray
+        Initial quantum state (normalized 2-element complex array)
+    seed : int, optional
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    (Q, z_trajectory, measurement_results) : tuple
+        - Q: float, entropy production
+        - z_trajectory: np.ndarray, z expectation values at each step
+        - measurement_results: np.ndarray, measurement outcomes
+    """
+    # Extract config parameters
+    epsilon = config['epsilon']
+    N_steps = config['N_steps']
+    J = config['J']
+    sigma_z = config['sigma_z']
+    sigma_x = config['sigma_x']
+    identity = config['identity']
+    
+    # Initialize RNG
+    rng = np.random.default_rng(seed)
+    
+    # Helper function: expectation value of z
+    def expectation_value_z(psi: np.ndarray) -> float:
+        return np.real(np.conj(psi) @ sigma_z @ psi)
+    
+    # Helper function: apply Hamiltonian evolution
+    def apply_hamiltonian_evolution(psi: np.ndarray, dt: float) -> np.ndarray:
+        if abs(J) < 1e-15:
+            return psi
+        theta = J * dt
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        U = cos_theta * identity - 1j * sin_theta * sigma_x
+        return U @ psi
+    
+    # Helper function: measurement update
+    def measurement_update(psi: np.ndarray) -> Tuple[np.ndarray, int, float]:
+        z_before = expectation_value_z(psi)
+        p_plus1 = 0.5 * (1.0 + epsilon * z_before)
+        xi = 1 if rng.random() < p_plus1 else -1
+        
+        sigma_z_minus_z = sigma_z - z_before * identity
+        first_order = xi * epsilon * 0.5 * sigma_z_minus_z @ psi
+        second_order_op = -0.5 * (epsilon**2) * 0.25 * (sigma_z_minus_z @ sigma_z_minus_z)
+        second_order = second_order_op @ psi
+        
+        psi_new = psi + first_order + second_order
+        norm = np.linalg.norm(psi_new)
+        if norm > 1e-15:
+            psi_new = psi_new / norm
+        else:
+            psi_new = psi / np.linalg.norm(psi)
+            
+        return psi_new, xi, z_before
+    
+    # Main simulation loop
+    psi = psi_initial.copy()
+    z_trajectory = np.zeros(N_steps + 1)
+    measurement_results = np.zeros(N_steps, dtype=int)
+    
+    z_trajectory[0] = expectation_value_z(psi)
+    dt = 1.0 / N_steps
+    Q = 0.0
+    
+    for i in range(N_steps):
+        if abs(J) > 1e-15:
+            psi = apply_hamiltonian_evolution(psi, dt)
+        
+        psi, xi, z_before = measurement_update(psi)
+        measurement_results[i] = xi
+        
+        z_after = expectation_value_z(psi)
+        z_trajectory[i + 1] = z_after
+        
+        Q += 2.0 * epsilon * xi * (z_before + z_after) / 2.0
+    
+    return Q, z_trajectory, measurement_results
 
 
 @dataclass
@@ -171,39 +274,28 @@ class SSEWavefunctionSimulator:
             z_trajectory: Array of z expectation values at each step
             measurement_results: Array of measurement outcomes ξ_i = ±1
         """
-        psi = self.psi_initial.copy()
-        z_trajectory = np.zeros(self.N_steps + 1)
-        measurement_results = np.zeros(self.N_steps, dtype=int)
+        # Create config dict for pure function
+        config = self._get_config_dict()
+        # Use pure function with no seed (generates random seed internally)
+        return _simulate_trajectory_pure(config, self.psi_initial, seed=None)
+    
+    def _get_config_dict(self) -> Dict[str, Any]:
+        """Get configuration as a dictionary for pure function execution.
         
-        # Initial z value
-        z_trajectory[0] = self._expectation_value_z(psi)
-        
-        # Time step for Hamiltonian evolution (if any)
-        dt = 1.0 / self.N_steps  # Normalize total time to 1
-        
-        Q = 0.0  # Entropy production accumulator
-        
-        for i in range(self.N_steps):
-            # Apply Hamiltonian evolution (if J ≠ 0)
-            if abs(self.J) > 1e-15:
-                psi = self._apply_hamiltonian_evolution(psi, dt)
-            
-            # Apply measurement
-            psi, xi, z_before = self._measurement_update(psi)
-            measurement_results[i] = xi
-            
-            # Calculate z after measurement
-            z_after = self._expectation_value_z(psi)
-            z_trajectory[i + 1] = z_after
-            
-            # Accumulate entropy production using discrete Stratonovich formula:
-            # Q = 2ε Σ r_i (z_{i-1} + z_i)/2
-            Q += 2.0 * self.epsilon * xi * (z_before + z_after) / 2.0
-        
-        return Q, z_trajectory, measurement_results
+        Returns a dictionary containing all simulation parameters needed
+        by the pure function version.
+        """
+        return {
+            'epsilon': self.epsilon,
+            'N_steps': self.N_steps,
+            'J': self.J,
+            'sigma_z': self.sigma_z,
+            'sigma_x': self.sigma_x,
+            'identity': self.identity,
+        }
     
     def simulate_ensemble(self, n_trajectories: int, progress: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Simulate an ensemble of trajectories.
+        """Simulate an ensemble of trajectories (sequential version).
         
         Parameters:
         -----------
@@ -241,6 +333,79 @@ class SSEWavefunctionSimulator:
             z_trajectories[i] = z_traj
             measurement_results[i] = meas_results
             
+        return Q_values, z_trajectories, measurement_results
+    
+    def simulate_ensemble_parallel(
+        self, 
+        n_trajectories: int, 
+        max_workers: Optional[int] = None,
+        progress: bool = False
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Simulate an ensemble of trajectories in parallel using ProcessPoolExecutor.
+        
+        This method uses concurrent.futures.ProcessPoolExecutor to run trajectories
+        in parallel across multiple CPU cores. The configuration is passed as a
+        dictionary to avoid pickling the entire class.
+        
+        Parameters:
+        -----------
+        n_trajectories : int
+            Number of independent trajectories to simulate
+        max_workers : int, optional
+            Maximum number of worker processes. If None, uses number of CPUs.
+        progress : bool
+            Whether to use tqdm progress bar
+            
+        Returns:
+        --------
+        (Q_values, z_trajectories, measurement_results)
+        where:
+            Q_values: Array of entropy production values (n_trajectories,)
+            z_trajectories: Array of z expectation trajectories (n_trajectories, N_steps+1)
+            measurement_results: Array of measurement outcomes (n_trajectories, N_steps)
+        """
+        # Prepare config dict (lightweight, easily picklable)
+        config = self._get_config_dict()
+        psi_initial = self.psi_initial.copy()
+        
+        # Generate unique seeds for each trajectory for reproducibility
+        base_seed = self.rng.integers(0, 2**31) if self.rng is not None else None
+        if base_seed is not None:
+            seeds = [base_seed + i for i in range(n_trajectories)]
+        else:
+            seeds = [None] * n_trajectories
+        
+        # Prepare arguments for parallel execution
+        args_list = [(config, psi_initial, seed) for seed in seeds]
+        
+        # Execute in parallel
+        Q_values = np.zeros(n_trajectories)
+        z_trajectories = np.zeros((n_trajectories, self.N_steps + 1))
+        measurement_results = np.zeros((n_trajectories, self.N_steps), dtype=int)
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            futures = [
+                executor.submit(_simulate_trajectory_pure, *args) 
+                for args in args_list
+            ]
+            
+            # Collect results with optional progress bar
+            if progress:
+                try:
+                    from tqdm import tqdm
+                    iterator = tqdm(futures, desc="Simulating trajectories (parallel)", total=n_trajectories)
+                except ImportError:
+                    iterator = futures
+            else:
+                iterator = futures
+            
+            for i, future in enumerate(iterator):
+                Q, z_traj, meas_results = future.result()
+                Q_values[i] = Q
+                z_trajectories[i] = z_traj
+                measurement_results[i] = meas_results
+        
         return Q_values, z_trajectories, measurement_results
     
     def theoretical_mean_variance(self) -> Tuple[float, float]:
@@ -314,16 +479,41 @@ if __name__ == "__main__":
     print(f"Initial z = {z_traj[0]:.3f}")
     print(f"Final z = {z_traj[-1]:.3f}")
     
-    # Ensemble test
+    # Ensemble test (sequential)
     n_traj = 1000
-    print(f"\nRunning ensemble simulation with {n_traj} trajectories...")
+    print(f"\n{'='*50}")
+    print(f"Running SEQUENTIAL ensemble with {n_traj} trajectories...")
+    import time
+    start = time.time()
     Q_values, _, _ = sim.simulate_ensemble(n_traj, progress=True)
+    seq_time = time.time() - start
     
     mean_Q = np.mean(Q_values)
     var_Q = np.var(Q_values)
     theoretical_mean, theoretical_var = sim.theoretical_mean_variance()
     
-    print(f"\nEnsemble results (n={n_traj}):")
+    print(f"\nSequential results (n={n_traj}, time={seq_time:.2f}s):")
     print(f"Observed: ⟨Q⟩ = {mean_Q:.3f}, Var(Q) = {var_Q:.3f}")
     print(f"Theory:   ⟨Q⟩ = {theoretical_mean:.3f}, Var(Q) = {theoretical_var:.3f}")
     print(f"Ratio:    ⟨Q⟩ = {mean_Q/theoretical_mean:.3f}, Var(Q) = {var_Q/theoretical_var:.3f}")
+    
+    # Parallel ensemble test
+    print(f"\n{'='*50}")
+    print(f"Running PARALLEL ensemble with {n_traj} trajectories...")
+    start = time.time()
+    Q_values_par, _, _ = sim.simulate_ensemble_parallel(n_traj, max_workers=None, progress=True)
+    par_time = time.time() - start
+    
+    mean_Q_par = np.mean(Q_values_par)
+    var_Q_par = np.var(Q_values_par)
+    
+    print(f"\nParallel results (n={n_traj}, time={par_time:.2f}s):")
+    print(f"Observed: ⟨Q⟩ = {mean_Q_par:.3f}, Var(Q) = {var_Q_par:.3f}")
+    print(f"Theory:   ⟨Q⟩ = {theoretical_mean:.3f}, Var(Q) = {theoretical_var:.3f}")
+    print(f"Ratio:    ⟨Q⟩ = {mean_Q_par/theoretical_mean:.3f}, Var(Q) = {var_Q_par/theoretical_var:.3f}")
+    
+    print(f"\n{'='*50}")
+    print(f"Performance comparison:")
+    print(f"Sequential time: {seq_time:.2f}s")
+    print(f"Parallel time:   {par_time:.2f}s")
+    print(f"Speedup:         {seq_time/par_time:.2f}x")
