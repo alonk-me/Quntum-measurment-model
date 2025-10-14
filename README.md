@@ -37,6 +37,7 @@ EP-simulation/
 - **Discrete vs continuous protocols** - Recently updated to support discrete ±1 outcomes
 - Entropy production calculation: Q = 2ε² Σ z_i⟨z⟩ + 2ε Σ ξ_i⟨z⟩
 - Comparison with analytical Arrow of Time distributions
+- **Parallel execution** - Multi-core support via ProcessPoolExecutor for ensemble simulations
 
 ### Kraus Operators Simulator  
 - **Discrete measurement steps** using Born rule probabilities
@@ -108,6 +109,42 @@ z_trajectory, Q_value = sim.run_trajectory(psi0, compute_entropy=True)
 
 print(f"Entropy production Q = {Q_value:.3f}")
 ```
+
+### SSE Wavefunction Simulator with Parallel Execution
+
+```python
+from sse_simulation.sse_wavefunction_simulation import SSEWavefunctionSimulator
+import numpy as np
+
+# Create simulator
+sim = SSEWavefunctionSimulator(
+    epsilon=0.1,      # measurement strength
+    N_steps=100,      # number of measurement steps
+    J=0.0,            # Hamiltonian coupling (0 = no coupling)
+    initial_state='bloch_equator'  # |+⟩ = (|0⟩ + |1⟩)/√2
+)
+
+# Single trajectory
+Q, z_trajectory, measurements = sim.simulate_trajectory()
+print(f"Single trajectory: Q = {Q:.3f}")
+
+# Sequential ensemble
+Q_values, z_trajs, meas = sim.simulate_ensemble(
+    n_trajectories=1000,
+    progress=True
+)
+print(f"Sequential: mean Q = {np.mean(Q_values):.3f}")
+
+# Parallel ensemble (faster for large ensembles)
+Q_values_par, z_trajs_par, meas_par = sim.simulate_ensemble_parallel(
+    n_trajectories=1000,
+    max_workers=4,    # Use 4 CPU cores (None = use all)
+    progress=True
+)
+print(f"Parallel: mean Q = {np.mean(Q_values_par):.3f}")
+```
+
+See `sse_simulation/PARALLEL_README.md` for detailed documentation on parallel execution.
 
 ### Kraus Operators Example
 
