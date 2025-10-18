@@ -113,9 +113,9 @@ class SSEWavefunctionSimulator:
         if abs(self.J) < 1e-15:  # No Hamiltonian evolution
             return psi
 
-        # H = J σ_x, so U = exp(-i J σ_y dt)
+        # H = J σ_y, so U = exp(-i J σ_y dt)
         # For σ_y: exp(-i θ σ_y) = cos(θ)I - i sin(θ)σ_y
-        theta = self.J * dt
+        theta = 2*np.pi*self.epsilon**2 #self.J * dt
         cos_theta = np.cos(theta)
         sin_theta = np.sin(theta)
         
@@ -189,11 +189,6 @@ class SSEWavefunctionSimulator:
             # Apply measurement
             psi, xi, z_before = self._measurement_update(psi)
 
-            # Apply Hamiltonian evolution (if J ≠ 0)
-            if abs(self.J) > 1e-15:
-                psi = self._apply_hamiltonian_evolution(psi, dt)
-            #save measurement result
-            measurement_results[i] = xi
             
             # Calculate z after measurement and save
             z_after = self._expectation_value_z(psi)
@@ -204,6 +199,12 @@ class SSEWavefunctionSimulator:
             first_order = 2.0 * self.epsilon * xi * (z_before + z_after) / 2.0
             second_order = 2.0 *(self.epsilon**2) * z_before * (z_before + z_after) / 2.0
             Q += first_order + second_order
+
+            # Apply Hamiltonian evolution (if J ≠ 0)
+            if abs(self.J) > 1e-15:
+                psi = self._apply_hamiltonian_evolution(psi, dt)
+            #save measurement result
+            measurement_results[i] = xi
         
         return Q, z_trajectory, measurement_results
     
