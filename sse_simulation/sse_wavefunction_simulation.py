@@ -115,11 +115,11 @@ class SSEWavefunctionSimulator:
 
         # H = J σ_y, so U = exp(-i J σ_y dt)
         # For σ_y: exp(-i θ σ_y) = cos(θ)I - i sin(θ)σ_y
-        theta = 2*np.pi*self.epsilon**2 #self.J * dt
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-        
-        U = cos_theta * self.identity - 1j * sin_theta * self.sigma_y
+        angle = 2*np.pi*self.epsilon**2 #self.J * dt
+        cos_angle = np.cos(angle)
+        sin_angle = np.sin(angle)
+
+        U = cos_angle * self.identity - 1j * sin_angle * self.sigma_y
         return U @ psi
     
     def _measurement_update(self, psi: np.ndarray) -> Tuple[np.ndarray, int, float]:
