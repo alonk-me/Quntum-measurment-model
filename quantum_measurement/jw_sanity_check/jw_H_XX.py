@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 from multiprocessing import Pool
 from typing import Iterable, List, Tuple
+from matrix_commutator_solver import compute_time_series
 
 def _pauli_matrices() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     sigma_x = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
@@ -81,7 +82,6 @@ def corr_magnetization(
     """
     if L != 2:
         raise NotImplementedError("Direct qubit chain simulation not implemented for L != 2.")
-    from free_fermion.matrix_commutator_solver import compute_time_series
 
     times, values = compute_time_series(L=L, J=J, T=T, steps=steps)
     # The solver returns 1 + 2*G[0,0], which maps to <sigma_z1>

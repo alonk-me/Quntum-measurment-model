@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantum-measurements"
 version = "0.1.0"
-description = "Monte Carlo simulations for single-qubit weak measurements"
+description = "simulations tools for qubit weak measurements models"
 readme = "README.md"
 authors = [{name = "Alon Kochol"}]
 requires-python = ">=3.8"
@@ -18,8 +18,6 @@ dependencies = [
 [project.optional-dependencies]
 progress = ["tqdm"]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
+# Flat layout: packages live directly under the repo root
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["quantum_measurement*"]

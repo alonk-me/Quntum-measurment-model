@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 from multiprocessing import Pool
 from typing import Iterable, List, Tuple
+from matrix_commutator_solver import compute_time_series
 
 
 def _pauli_matrices() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -102,7 +103,6 @@ def corr_magnetization(
     """
     if L != 2:
         raise NotImplementedError("corr_magnetization currently implemented for L=2 only.")
-    from free_fermion.matrix_commutator_solver import compute_time_series
 
     times, values = compute_time_series(L=L, J=J, T=T, steps=steps)
     magnetization = np.real(values.astype(complex))
