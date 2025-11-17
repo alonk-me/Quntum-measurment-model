@@ -331,11 +331,11 @@ if __name__ == "__main__":
     print(f"Parameters:")
     print(f"  L = {sim.L} qubits")
     print(f"  J = {sim.J}")
-    print(f"  ε = {sim.epsilon}")
+    print(f"  epsilon = {sim.epsilon}")
     print(f"  N = {sim.N_steps}")
     print(f"  T = {sim.T}")
     print(f"  dt = {sim.dt:.6f}")
-    print(f"  T/τ = N×ε² = {sim.N_steps * sim.epsilon**2:.3f}")
+    print(f"  T/tau = N*epsilon^2 = {sim.N_steps * sim.epsilon**2:.3f}")
     print(f"  Boundary conditions: {'periodic' if sim.periodic else 'open'}")
     
     # Single trajectory
@@ -354,16 +354,16 @@ if __name__ == "__main__":
     std_Q = np.std(Q_values)
     theoretical_Q = sim.theoretical_prediction()
     
-    # Compute average A = ⟨z²⟩ from trajectories
+    # Compute average A = <z^2> from trajectories
     z_squared = z_trajs**2  # shape (n_traj, N_steps+1, L)
     A_observed = np.mean(z_squared)
     A_per_qubit = np.mean(z_squared, axis=(0, 1))
     
     print(f"\nResults:")
-    print(f"  Observed ⟨Q⟩ = {mean_Q:.3f} ± {std_Q:.3f}")
-    print(f"  Theoretical ⟨Q⟩ = {theoretical_Q:.3f} (assuming A=0.5)")
+    print(f"  Observed <Q> = {mean_Q:.3f} +/- {std_Q:.3f}")
+    print(f"  Theoretical <Q> = {theoretical_Q:.3f} (assuming A=0.5)")
     print(f"  Ratio: {mean_Q/theoretical_Q:.3f}")
-    print(f"  Observed A = ⟨z²⟩ = {A_observed:.3f}")
+    print(f"  Observed A = <z^2> = {A_observed:.3f}")
     print(f"  A per qubit: {A_per_qubit}")
     
     # Compare with L=2 case
@@ -380,6 +380,6 @@ if __name__ == "__main__":
     mean_Q_2 = np.mean(Q_values_2)
     theoretical_Q_2 = sim2.theoretical_prediction()
     
-    print(f"  L=2: ⟨Q⟩ = {mean_Q_2:.3f}, Theory = {theoretical_Q_2:.3f}, Ratio = {mean_Q_2/theoretical_Q_2:.3f}")
-    print(f"  L=3: ⟨Q⟩ = {mean_Q:.3f}, Theory = {theoretical_Q:.3f}, Ratio = {mean_Q/theoretical_Q:.3f}")
+    print(f"  L=2: <Q> = {mean_Q_2:.3f}, Theory = {theoretical_Q_2:.3f}, Ratio = {mean_Q_2/theoretical_Q_2:.3f}")
+    print(f"  L=3: <Q> = {mean_Q:.3f}, Theory = {theoretical_Q:.3f}, Ratio = {mean_Q/theoretical_Q:.3f}")
     print(f"  Scaling ratio (L=3)/(L=2): Observed = {mean_Q/mean_Q_2:.3f}, Theory = {theoretical_Q/theoretical_Q_2:.3f}")

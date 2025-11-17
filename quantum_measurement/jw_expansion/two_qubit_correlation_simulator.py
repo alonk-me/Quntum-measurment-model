@@ -275,18 +275,18 @@ if __name__ == "__main__":
     
     print(f"Parameters:")
     print(f"  J = {sim.J}")
-    print(f"  ε = {sim.epsilon}")
+    print(f"  epsilon = {sim.epsilon}")
     print(f"  N = {sim.N_steps}")
     print(f"  T = {sim.T}")
     print(f"  dt = {sim.dt:.6f}")
-    print(f"  T/τ = N×ε² = {sim.N_steps * sim.epsilon**2:.3f}")
+    print(f"  T/tau = N*epsilon^2 = {sim.N_steps * sim.epsilon**2:.3f}")
     
     # Single trajectory
     Q, z_traj, xi_traj = sim.simulate_trajectory()
     print(f"\nSingle trajectory:")
     print(f"  Q = {Q:.3f}")
-    print(f"  Initial z₁, z₂ = {z_traj[0]}")
-    print(f"  Final z₁, z₂ = {z_traj[-1]}")
+    print(f"  Initial z1, z2 = {z_traj[0]}")
+    print(f"  Final z1, z2 = {z_traj[-1]}")
     
     # Ensemble
     n_traj = 1000
@@ -297,12 +297,12 @@ if __name__ == "__main__":
     std_Q = np.std(Q_values)
     theoretical_Q = sim.theoretical_prediction()
     
-    # Compute average A = ⟨z²⟩ from trajectories
+    # Compute average A = <z^2> from trajectories
     z_squared = z_trajs[:, :, :]**2  # shape (n_traj, N_steps+1, 2)
     A_observed = np.mean(z_squared)
     
     print(f"\nResults:")
-    print(f"  Observed ⟨Q⟩ = {mean_Q:.3f} ± {std_Q:.3f}")
-    print(f"  Theoretical ⟨Q⟩ = {theoretical_Q:.3f} (assuming A=0.5)")
+    print(f"  Observed <Q> = {mean_Q:.3f} +/- {std_Q:.3f}")
+    print(f"  Theoretical <Q> = {theoretical_Q:.3f} (assuming A=0.5)")
     print(f"  Ratio: {mean_Q/theoretical_Q:.3f}")
-    print(f"  Observed A = ⟨z²⟩ = {A_observed:.3f}")
+    print(f"  Observed A = <z^2> = {A_observed:.3f}")
