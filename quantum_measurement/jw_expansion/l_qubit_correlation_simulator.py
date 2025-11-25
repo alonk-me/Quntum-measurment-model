@@ -357,7 +357,7 @@ class LQubitCorrelationSimulator:
 
         return Q_values, z_series, xi_series
 
-    def theoretical_prediction(self, A: Optional[float] = None) -> float:
+    def theoretical_prediction(self, A: Optional[list[float]] = None) -> float:
         r"""Estimate the theoretical mean entropy production ⟨Q⟩.
 
         In the strong‑coupling limit (``|J| → ∞``) the measurement dynamics
@@ -375,8 +375,8 @@ class LQubitCorrelationSimulator:
 
         Parameters
         ----------
-        A : float, optional
-            Assumed average of ``z_i^2`` across time and sites.  Defaults
+        A : list[float], optional
+            list of average of ``z_i^2`` across time and sites.  Defaults
             to ``0.5`` if not provided.
 
         Returns
@@ -384,12 +384,14 @@ class LQubitCorrelationSimulator:
         float
             Approximate theoretical mean entropy production.
         """
+        T_over_tau = self.N_steps * (self.epsilon ** 2)
         if A is None:
             A = 0.5
-        T_over_tau = self.N_steps * (self.epsilon ** 2)
-        # Sum over all sites: each contributes (A + 1)
-        return T_over_tau * self.L * (A + 1.0)
-
+            # Sum over all sites: each contributes (A + 1)
+            return T_over_tau * self.L * (A + 1.0)
+        else:
+            A_sum = np.sum(A + 1.0)
+            return T_over_tau * A_sum
 
 if __name__ == "__main__":  # pragma: no cover
     # Simple test run when executed directly
