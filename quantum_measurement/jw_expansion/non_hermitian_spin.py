@@ -21,17 +21,18 @@ entropy production rate can be written as
 
 .. math::
 
-    \frac{\mathrm{d}Q}{\mathrm{d}t}
-      = \gamma \sum_{j=0}^{L-1} \bigl(1 - \langle n_j \rangle\bigr)
-      = \frac{\gamma}{2} \sum_{j=0}^{L-1}
-        \bigl(1 - \langle σ^z_j \rangle\bigr),
+    \\frac{\\mathrm{d}Q}{\\mathrm{d}t}
+      = \\gamma \\sum_{j=0}^{L-1} \\bigl(1 - \\langle n_j \\rangle\\bigr)
+      = \\frac{\\gamma}{2} \\sum_{j=0}^{L-1}
+        \\bigl(1 - \\langle σ^z_j \\rangle\\bigr),
 
 which makes explicit the normalisation difference between number and spin
 operators.
 
 The class defined here, ``NonHermitianSpinSimulator``, follows the same
 interface as ``NonHermitianHatSimulator`` but returns arrays of
-magnetisation expectation values instead of occupations.
+magnetisation expectation values instead of occupations.  The total
+evolution time is ``T_total = dt * N_steps``.
 """
 
 from __future__ import annotations

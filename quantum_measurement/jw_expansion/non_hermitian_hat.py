@@ -87,9 +87,12 @@ class NonHermitianHatSimulator:
     gamma : float
         Monitoring rate of the number operators ``n_j``.  The imaginary
         potential is ``-i γ/2 Σ n_j``.
-    N_steps : int
+    dt : float, optional
+        Time step for Euler integration.  For numerical accuracy, choose
+        ``dt < 0.1 / max(J, gamma)``.  Default is ``0.001``.
+    N_steps : int, optional
         Number of time steps for the simulation.  The total evolution time
-        is fixed to unity and the timestep is ``dt = 1/N_steps``.
+        is ``T_total = dt * N_steps``.  Default is ``10000``.
     closed_boundary : bool, optional
         If ``True`` the chain has periodic boundary conditions; if ``False``
         open boundaries are used.  Default is ``False``.
@@ -98,10 +101,11 @@ class NonHermitianHatSimulator:
     L: int = 2
     J: float = 1.0
     gamma: float = 0.1
-    N_steps: int = 1000
+    dt: float = 0.0001
+    N_steps: int = 10000
     closed_boundary: bool = False
     # Derived quantities initialised post construction
-    dt: float = field(init=False)
+    T_total: float = field(init=False)
     h: np.ndarray = field(init=False, repr=False)
     G_initial: np.ndarray = field(init=False, repr=False)
 
@@ -113,8 +117,25 @@ class NonHermitianHatSimulator:
             raise ValueError("N_steps must be at least 1")
         if self.gamma < 0:
             raise ValueError("gamma must be non‑negative")
-        # Time step (total evolution time normalised to unity)
-        self.dt = 1.0 / self.N_steps
+        if self.dt <= 0:
+            raise ValueError("dt must be positive")
+        # Compute total evolution time
+        self.T_total = self.dt * self.N_steps
+        # Numerical stability warnings
+        import warnings
+        max_rate = max(abs(self.J), self.gamma)
+        if self.dt * max_rate > 1.0:
+            warnings.warn(
+                f"Large dt*max(J,gamma) = {self.dt * max_rate:.3f} may cause "
+                f"numerical instability. Consider dt < {0.5/max_rate:.4f}",
+                UserWarning
+            )
+        if self.dt * max_rate < 0.001:
+            warnings.warn(
+                f"Very small dt*max(J,gamma) = {self.dt * max_rate:.6f} may require "
+                f"many steps. Current T_total = {self.T_total:.4f}",
+                UserWarning
+            )
         # Build Bogoliubov–de Gennes Hamiltonian
         self.h = self._build_hamiltonian()
         # Construct initial correlation matrix corresponding to vacuum.
@@ -171,11 +192,19 @@ class NonHermitianHatSimulator:
         """One Euler step of imaginary‑potential evolution.
 
         The effective non‑Hermitian contribution ``-i γ/2 Σ n_j`` produces
-        decay of every annihilation and creation operator at rate ``γ/2``.
-        For the covariance matrix this yields ``˙G = -γ G``.  We implement
-        the explicit update ``G ← G - γ dt G``.
+        the evolution given by:
+        δG = dt γ [(G σ^z G) - 1/2(σ^z G + G σ^z)]
+        where σ^z = diag{1,...,1,-1,...,-1} with L ones and L minus ones.
         """
-        return G + (-self.gamma * self.dt) * G
+        # Construct sigma_z = diag(1,...,1,-1,...,-1)
+        sigma_z = np.diag(np.concatenate([np.ones(self.L), -np.ones(self.L)]))
+        
+        # Compute the update: δG = dt γ [(G σ^z G) - 1/2(σ^z G + G σ^z)]
+        term1 = G @ sigma_z @ G
+        term2 = 0.5 * (sigma_z @ G + G @ sigma_z)
+        delta_G = self.dt * self.gamma * (term1 - term2)
+        
+        return G + delta_G
 
     def _compute_n_values(self, G: np.ndarray) -> np.ndarray:
         """Compute occupations ``⟨n_i⟩`` from the covariance matrix.
@@ -190,16 +219,18 @@ class NonHermitianHatSimulator:
         """Propagate a single trajectory and compute entropy production.
 
         The correlation matrix is initialised to the vacuum and then
-        updated for ``N_steps`` discrete time increments.  At each step the
-        state is evolved under the coherent Hamiltonian followed by the
-        imaginary potential.  The occupations before and after the step are
-        used to compute the Stratonovich average ``n̄_i``.  The entropy
-        increment for the step is then
+        updated for ``N_steps`` discrete time increments of size ``dt``.
+        At each step the state is evolved under the coherent Hamiltonian
+        followed by the imaginary potential.  The occupations before and
+        after the step are used to compute the Stratonovich average ``n̄_i``.
+        The entropy increment for the step is then
 
         .. math::
 
-            \Delta Q = \gamma\, mathrm{dt}\,\sum_{i=0}^{L-1}
+            \Delta Q = \gamma\, dt\,\sum_{i=0}^{L-1}
               \bigl(1 - \bar{n}_i\bigr).
+
+        The total evolution time is ``T_total = dt * N_steps``.
 
         Returns
         -------

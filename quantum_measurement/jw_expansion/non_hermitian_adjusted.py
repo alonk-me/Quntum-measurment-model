@@ -31,28 +31,28 @@ from non_hermitian_hat import NonHermitianHatSimulator
 
 @dataclass
 class NonHermitianAdjustedSimulator(NonHermitianHatSimulator):
-    """Subtract the trivial ``γ L`` contribution from the entropy budget.
+    """Subtract the trivial ``γ L T`` contribution from the entropy budget.
 
     This subclass behaves identically to its parent but returns an entropy
-    production value with the extensive ``γ L`` term removed.  Concretely
-    if the parent class reports ``Q`` after evolving for total time ``T``
-    (normalised to unity in :class:`NonHermitianHatSimulator`), this class
-    returns ``Q - γ L``.  When dividing by the number of time steps one
-    obtains the adjusted entropy production rate plotted in the PDF.
+    production value with the extensive ``γ L T_total`` term removed.
+    Concretely if the parent class reports ``Q`` after evolving for total
+    time ``T_total = dt * N_steps``, this class returns ``Q - γ L T_total``.
+    When dividing by the total time one obtains the adjusted entropy
+    production rate plotted in the PDF.
     """
 
     def simulate_trajectory(self) -> Tuple[float, any]:
-        """Run a trajectory and subtract ``γ L`` from the entropy.
+        """Run a trajectory and subtract ``γ L T`` from the entropy.
 
         Returns
         -------
         Q_adj : float
-            The adjusted entropy production, ``Q - γ L``.
+            The adjusted entropy production, ``Q - γ L T_total``.
         n_traj : numpy.ndarray
             Occupation trajectory from the parent class.
         """
         Q_raw, n_traj = super().simulate_trajectory()
-        # The total evolution time is 1 in the base class.  Subtract γ L.
-        # Q_adj = Q_raw - self.gamma * self.L
-        Q_adj = self.gamma * self.L - Q_raw
+        # Subtract the extensive gamma*L*T_total term from the entropy budget.
+        # Q_adj = Q_raw - self.gamma * self.L * self.T_total
+        Q_adj = self.gamma * self.L * self.T_total - Q_raw
         return Q_adj, n_traj
