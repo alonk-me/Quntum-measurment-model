@@ -56,8 +56,17 @@ class NonHermitianSpinSimulator(NonHermitianHatSimulator):
     equivalently be expressed in terms of ``σ^z_i``.
     """
 
-    def simulate_trajectory(self) -> Tuple[float, np.ndarray]:
+    def simulate_trajectory(
+        self,
+        return_G_final: bool = False
+    ) -> Tuple[float, np.ndarray] | Tuple[float, np.ndarray, np.ndarray]:
         """Run a single trajectory and return entropy and magnetisation.
+
+        Parameters
+        ----------
+        return_G_final : bool, optional
+            If True, returns the final correlation matrix G_final as third
+            return value. Default is False for backward compatibility.
 
         Returns
         -------
@@ -66,6 +75,8 @@ class NonHermitianSpinSimulator(NonHermitianHatSimulator):
         z_traj : numpy.ndarray
             Array of shape ``(N_steps+1, L)`` containing ``⟨σ^z⟩`` on each
             site at each time step.
+        G_final : numpy.ndarray, optional
+            The final correlation matrix. Only returned if return_G_final=True.
         """
         G = self.G_initial.copy()
         z_traj = np.zeros((self.N_steps + 1, self.L), dtype=float)
@@ -94,4 +105,8 @@ class NonHermitianSpinSimulator(NonHermitianHatSimulator):
             n_avg = 0.5 * (n_before + n_after)
             # entropy increment expressed in terms of occupations
             Q += self.gamma * self.dt * np.sum(1.0 - n_avg)
-        return Q, z_traj
+        
+        if return_G_final:
+            return Q, z_traj, G
+        else:
+            return Q, z_traj

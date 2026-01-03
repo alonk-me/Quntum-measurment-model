@@ -1,4 +1,4 @@
-"""
+r"""
 Adjusted non-Hermitian simulator (matching entropy plots).
 ========================================================
 
@@ -41,8 +41,17 @@ class NonHermitianAdjustedSimulator(NonHermitianHatSimulator):
     production rate plotted in the PDF.
     """
 
-    def simulate_trajectory(self) -> Tuple[float, any]:
+    def simulate_trajectory(
+        self,
+        return_G_final: bool = False
+    ) -> Tuple[float, np.ndarray] | Tuple[float, np.ndarray, np.ndarray]:
         """Run a trajectory and subtract ``γ L T`` from the entropy.
+
+        Parameters
+        ----------
+        return_G_final : bool, optional
+            If True, returns the final correlation matrix G_final as third
+            return value. Default is False for backward compatibility.
 
         Returns
         -------
@@ -50,9 +59,21 @@ class NonHermitianAdjustedSimulator(NonHermitianHatSimulator):
             The adjusted entropy production, ``Q - γ L T_total``.
         n_traj : numpy.ndarray
             Occupation trajectory from the parent class.
+        G_final : numpy.ndarray, optional
+            The final correlation matrix. Only returned if return_G_final=True.
         """
-        Q_raw, n_traj = super().simulate_trajectory()
+        result = super().simulate_trajectory(return_G_final=return_G_final)
+        
+        if return_G_final:
+            Q_raw, n_traj, G_final = result
+        else:
+            Q_raw, n_traj = result
+        
         # Subtract the extensive gamma*L*T_total term from the entropy budget.
         # Q_adj = Q_raw - self.gamma * self.L * self.T_total
         Q_adj = self.gamma * self.L * self.T_total - Q_raw
-        return Q_adj, n_traj
+        
+        if return_G_final:
+            return Q_adj, n_traj, G_final
+        else:
+            return Q_adj, n_traj

@@ -1,4 +1,4 @@
-"""
+r"""
 Non-Hermitian evolution for monitored free fermions (number operator version).
 ==========================================================================
 
@@ -215,7 +215,10 @@ class NonHermitianHatSimulator:
         """
         return np.real(np.diag(G)[: self.L])
 
-    def simulate_trajectory(self) -> Tuple[float, np.ndarray]:
+    def simulate_trajectory(
+        self, 
+        return_G_final: bool = True
+    ) -> Tuple[float, np.ndarray] | Tuple[float, np.ndarray, np.ndarray]:
         """Propagate a single trajectory and compute entropy production.
 
         The correlation matrix is initialised to the vacuum and then
@@ -232,6 +235,13 @@ class NonHermitianHatSimulator:
 
         The total evolution time is ``T_total = dt * N_steps``.
 
+        Parameters
+        ----------
+        return_G_final : bool, optional
+            If True, returns the final correlation matrix G_final as third
+            return value. If False, returns only (Q_total, n_traj) for
+            backward compatibility. Default is True.
+
         Returns
         -------
         Q_total : float
@@ -239,6 +249,10 @@ class NonHermitianHatSimulator:
         n_traj : numpy.ndarray
             An array of shape ``(N_steps+1, L)`` recording the occupations at
             each time step, including the initial state.
+        G_final : numpy.ndarray, optional
+            The final correlation matrix of shape ``(2L, 2L)`` after all
+            evolution steps, representing the steady state. Only returned
+            if return_G_final=True.
         """
         G = self.G_initial.copy()
         n_traj = np.zeros((self.N_steps + 1, self.L), dtype=float)
@@ -265,4 +279,8 @@ class NonHermitianHatSimulator:
             # Stratonovich average for entropy production
             n_avg = 0.5 * (n_before + n_after)
             Q += self.gamma * self.dt * np.sum(1.0 - 2*n_avg)
-        return Q, n_traj
+        
+        if return_G_final:
+            return Q, n_traj, G
+        else:
+            return Q, n_traj
