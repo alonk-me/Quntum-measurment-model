@@ -21,7 +21,7 @@ Tools for computing the steady-state occupation n_∞(g).
 """
 
 from .two_qubit_correlation_simulator import TwoQubitCorrelationSimulator
-from .multi_qubit_correlation_simulator import MultiQubitCorrelationSimulator
+from .l_qubit_correlation_simulator import LQubitCorrelationSimulator as MultiQubitCorrelationSimulator
 from .n_infty import (
     delta,
     sign_im,
