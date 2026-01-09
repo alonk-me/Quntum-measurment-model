@@ -4,3 +4,6 @@
 *docs/
 TODO.md
 *egg-info/
+venv/
+*.png
+*.csv
