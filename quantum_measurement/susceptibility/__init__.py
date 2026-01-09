@@ -22,6 +22,7 @@ from quantum_measurement.susceptibility.static_susceptibility import (
     compute_static_susceptibility,
     compute_connected_correlation,
     compute_single_site_susceptibility,
+    compute_susceptibility_matrix,
 )
 
 from quantum_measurement.susceptibility.correlation_matrix_susceptibility import (
@@ -33,6 +34,7 @@ __all__ = [
     'compute_static_susceptibility',
     'compute_connected_correlation',
     'compute_single_site_susceptibility',
+    'compute_susceptibility_matrix',
     'susceptibility_from_correlation_matrix',
     'extract_spin_correlations',
 ]

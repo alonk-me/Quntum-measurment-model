@@ -128,10 +128,10 @@ def compute_static_susceptibility(
     # Integrate using trapezoidal rule
     # Handle both 1D and 2D cases
     if sigma_i.ndim == 1:
-        chi = np.trapz(connected_corr, times)
+        chi = np.trapezoid(connected_corr, times)
     else:
         # Use average times for ensemble
-        chi = np.trapz(connected_corr, times)
+        chi = np.trapezoid(connected_corr, times)
     
     return chi
 

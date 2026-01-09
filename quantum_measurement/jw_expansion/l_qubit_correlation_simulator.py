@@ -392,6 +392,115 @@ class LQubitCorrelationSimulator:
         else:
             A_sum = np.sum(A + 1.0)
             return T_over_tau * A_sum
+    
+    def compute_susceptibility(
+        self,
+        z_trajectory: np.ndarray,
+        site_i: int = 0,
+        site_j: Optional[int] = None,
+    ) -> float:
+        """Compute susceptibility between sites i and j from a z trajectory.
+        
+        Parameters
+        ----------
+        z_trajectory : np.ndarray
+            Trajectory of shape (N_steps+1, L) containing ⟨σᶻ⟩ for all sites
+        site_i : int
+            First site index (0 to L-1)
+        site_j : int, optional
+            Second site index. If None, use site_i (autocorrelation)
+        
+        Returns
+        -------
+        float
+            Static susceptibility χ_ij
+        
+        Examples
+        --------
+        >>> sim = LQubitCorrelationSimulator(L=4)
+        >>> Q, z_traj, _ = sim.simulate_trajectory()
+        >>> chi = sim.compute_susceptibility(z_traj, site_i=0, site_j=1)
+        """
+        from quantum_measurement.susceptibility import compute_static_susceptibility
+        
+        if site_j is None:
+            site_j = site_i
+        
+        times = np.linspace(0, self.T, self.N_steps + 1)
+        z_i = z_trajectory[:, site_i]
+        z_j = z_trajectory[:, site_j]
+        
+        chi = compute_static_susceptibility(times, z_i, z_j)
+        return chi
+    
+    def compute_susceptibility_matrix(
+        self,
+        z_trajectory: np.ndarray,
+    ) -> np.ndarray:
+        """Compute full L×L susceptibility matrix from a trajectory.
+        
+        Parameters
+        ----------
+        z_trajectory : np.ndarray
+            Trajectory of shape (N_steps+1, L)
+        
+        Returns
+        -------
+        np.ndarray
+            Susceptibility matrix χ[i,j] of shape (L, L)
+        
+        Examples
+        --------
+        >>> sim = LQubitCorrelationSimulator(L=4)
+        >>> Q, z_traj, _ = sim.simulate_trajectory()
+        >>> chi_matrix = sim.compute_susceptibility_matrix(z_traj)
+        """
+        from quantum_measurement.susceptibility import compute_susceptibility_matrix
+        
+        times = np.linspace(0, self.T, self.N_steps + 1)
+        # Transpose to get shape (L, N_steps+1)
+        z_traj_transposed = z_trajectory.T
+        
+        chi_matrix = compute_susceptibility_matrix(times, z_traj_transposed)
+        return chi_matrix
+    
+    def compute_susceptibility_ensemble(
+        self,
+        z_trajectories: np.ndarray,
+        site_i: int = 0,
+        site_j: Optional[int] = None,
+    ) -> Tuple[float, float]:
+        """Compute average susceptibility over an ensemble of trajectories.
+        
+        Parameters
+        ----------
+        z_trajectories : np.ndarray
+            Ensemble of trajectories, shape (n_trajectories, N_steps+1, L)
+        site_i : int
+            First site index (0 to L-1)
+        site_j : int, optional
+            Second site index. If None, use site_i
+        
+        Returns
+        -------
+        Tuple[float, float]
+            (mean_chi, std_chi) - mean and standard deviation of susceptibility
+        
+        Examples
+        --------
+        >>> sim = LQubitCorrelationSimulator(L=4)
+        >>> Q_vals, z_trajs, _ = sim.simulate_ensemble(100)
+        >>> mean_chi, std_chi = sim.compute_susceptibility_ensemble(z_trajs, 0, 1)
+        """
+        n_traj = z_trajectories.shape[0]
+        chi_values = np.zeros(n_traj)
+        
+        for i in range(n_traj):
+            chi_values[i] = self.compute_susceptibility(
+                z_trajectories[i], site_i, site_j
+            )
+        
+        return np.mean(chi_values), np.std(chi_values)
 
 if __name__ == "__main__":  # pragma: no cover
     # Simple test run when executed directly

@@ -11,6 +11,6 @@ Simulators:
 """
 
 from .two_qubit_correlation_simulator import TwoQubitCorrelationSimulator
-from .multi_qubit_correlation_simulator import MultiQubitCorrelationSimulator
+from .l_qubit_correlation_simulator import LQubitCorrelationSimulator
 
-__all__ = ['TwoQubitCorrelationSimulator', 'MultiQubitCorrelationSimulator']
+__all__ = ['TwoQubitCorrelationSimulator', 'LQubitCorrelationSimulator']
