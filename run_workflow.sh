@@ -28,13 +28,14 @@ echo ""
 echo "  1) Run smoke test notebook (Jupyter)"
 echo "  2) Run production sweep (background)"
 echo "  3) Start live monitor"
-echo "  4) Generate analysis plots"
-echo "  5) View latest results"
-echo "  6) Launch tmux session (recommended for remote)"
-echo "  7) Python shell (with venv)"
+echo "  4) Generate analysis plots (original)"
+echo "  5) Generate enhanced plots (n_∞, 1st & 2nd derivatives)"
+echo "  6) View latest results"
+echo "  7) Launch tmux session (recommended for remote)"
+echo "  8) Python shell (with venv)"
 echo "  q) Quit"
 echo ""
-read -p "Enter choice [1-7 or q]: " choice
+read -p "Enter choice [1-8 or q]: " choice
 
 case $choice in
     1)
@@ -56,17 +57,21 @@ case $choice in
         python scripts/plot_progress.py
         ;;
     4)
-        echo "Generating analysis plots..."
+        echo "Generating analysis plots (original)..."
         python scripts/generate_analysis_plots.py
         ;;
     5)
+        echo "Generating enhanced plots (n_∞, 1st & 2nd derivatives)..."
+        python scripts/generate_final_plots.py
+        ;;
+    6)
         echo "Latest CSV files:"
         ls -lht results/ninf_scan/*.csv 2>/dev/null | head -3
         echo ""
         echo "Latest plots:"
         ls -lht results/ninf_scan/*.png 2>/dev/null | head -5
         ;;
-    6)
+    7)
         echo "Launching tmux session 'ninf_scan'..."
         tmux new-session -s ninf_scan \; \
             send-keys "cd $(pwd) && source venv/bin/activate && python scripts/run_ninf_scan.py" C-m \; \
@@ -74,7 +79,7 @@ case $choice in
             send-keys "cd $(pwd) && source venv/bin/activate && python scripts/plot_progress.py" C-m \; \
             select-pane -t 0
         ;;
-    7)
+    8)
         echo "Starting Python shell with venv..."
         python
         ;;
