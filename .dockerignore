@@ -1,0 +1,48 @@
+# ── Version control ────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Editor / IDE ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Python build artifacts ─────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ────────────────────────────────────────────────────────
+.venv/
+venv/
+
+# ── Rust build artifacts ────────────────────────────────────────────────────────
+# The target/ directory is large (hundreds of MB); exclude it so the Docker
+# daemon only sees source files.  The multi-stage builder downloads and
+# compiles dependencies from scratch inside the container.
+rust/target/
+
+# ── Compiled Python extensions ─────────────────────────────────────────────────
+# The .so is regenerated inside the container from the Rust sources.
+*cpython*.so
+
+# ── Notebook outputs / checkpoints ─────────────────────────────────────────────
+notebooks/.ipynb_checkpoints/
+.ipynb_checkpoints/
+
+# ── Test / benchmark artefacts ─────────────────────────────────────────────────
+.pytest_cache/
+*.log
+*.pid
+
+# ── Data files ─────────────────────────────────────────────────────────────────
+*.png
+*.csv
+results/
+docs/

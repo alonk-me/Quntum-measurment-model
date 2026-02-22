@@ -54,11 +54,41 @@ EP-simulation/
 
 ## Installation
 
-### Prerequisites
+### Docker (recommended – zero local dependencies)
+
+The repository ships with a multi-stage `Dockerfile` that:
+1. Compiles the Rust extension with `maturin` (builder stage)
+2. Installs all Python dependencies and the compiled wheel (runtime stage)
+
+```bash
+# Build the image (takes ~3–5 minutes on first run; subsequent builds are fast
+# thanks to layer caching of Rust dependencies)
+docker build -t quantum-measurements .
+
+# Optional: build with CPU-native optimisations (faster, but the image will
+# only run on hosts with the same CPU feature set as the build machine)
+docker build --build-arg RUSTFLAGS="" -t quantum-measurements-native .
+
+# Run the default self-test
+docker run --rm quantum-measurements
+
+# Run the benchmark script
+docker run --rm quantum-measurements python scripts/benchmark_rust_vs_python.py
+
+# Run the full test suite
+docker run --rm quantum-measurements python -m pytest tests/ -v
+
+# Launch an interactive Python shell
+docker run --rm -it quantum-measurements python
+```
+
+### Local setup
+
+#### Prerequisites
 - Python 3.8 or higher
 - Virtual environment support
 
-### Setup
+#### Setup
 
 1. **Clone the repository:**
    ```bash
