@@ -267,7 +267,7 @@ def integral_expr(g: float, Nk: int = 3000) -> float:
     k_vals = np.linspace(0.0, np.pi, Nk)
     d = delta(k_vals, g)
     integrand = np.abs(np.imag(d)) / g
-    integral = np.trapz(integrand, k_vals) / np.pi
+    integral = np.trapezoid(integrand, k_vals) / np.pi
     return 0.5 - 0.5 * integral
 
 
