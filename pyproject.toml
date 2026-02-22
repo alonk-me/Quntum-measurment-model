@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0"]
+build-backend = "maturin"
 
 [project]
 name = "quantum-measurements"
@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 progress = ["tqdm"]
 
-# Flat layout: packages live directly under the repo root
-[tool.setuptools.packages.find]
-include = ["quantum_measurement*"]
+[tool.maturin]
+module-name = "quantum_measurement._rust"
+manifest-path = "rust/Cargo.toml"
+python-packages = ["quantum_measurement"]

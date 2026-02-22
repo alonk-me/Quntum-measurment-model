@@ -85,6 +85,31 @@ EP-simulation/
    pip install -e .[progress]
    ```
 
+4. **Build the Rust acceleration extension (optional but recommended):**
+
+   The package includes a Rust extension (`quantum_measurement._rust`) that
+   accelerates the `LQubitCorrelationSimulator` by 5–15× for single trajectories
+   and 10–20× for ensembles via Rayon parallelism.
+
+   Requirements: Rust toolchain (https://rustup.rs/) and `maturin`.
+   ```bash
+   pip install maturin
+   maturin build --release
+   # The wheel path includes the Python version and platform; check rust/target/wheels/
+   pip install rust/target/wheels/quantum_measurements-*.whl --force-reinstall
+   ```
+
+   Alternatively, for a development installation that avoids the wheel step:
+   ```bash
+   pip install maturin
+   # From a virtualenv:
+   maturin develop --release
+   ```
+
+   Once built the Rust simulator is automatically used by the notebook cells
+   that import `FastLQubitSimulator`.  If the extension is not built the
+   package falls back to the pure-Python implementation transparently.
+
 ## Quick Start
 
 ### SSE Simulation Example
