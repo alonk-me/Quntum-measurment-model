@@ -314,6 +314,32 @@ class LQubitCorrelationSimulator:
 
         return Q, z_traj, xi_traj
 
+    def simulate_z2_mean(self) -> float:
+        r"""Simulate a single trajectory and return mean z^2 over time and sites.
+
+        This method avoids storing the full trajectory to reduce memory usage
+        for long runs. The returned value is equivalent to
+        ``np.average(z_traj**2)`` from ``simulate_trajectory``.
+
+        Returns
+        -------
+        float
+            Mean of z^2 over all sites and time steps.
+        """
+        G = self.G_initial.copy()
+
+        z = self._compute_z_values(G)
+        sum_z2 = float(np.sum(z ** 2))
+
+        for _ in range(self.N_steps):
+            G = self._hamiltonian_step(G)
+            G, _ = self._measurement_step(G)
+            z = self._compute_z_values(G)
+            sum_z2 += float(np.sum(z ** 2))
+
+        total_samples = (self.N_steps + 1) * self.L
+        return sum_z2 / total_samples
+
     def simulate_ensemble(self, n_trajectories: int, progress: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Simulate an ensemble of measurement trajectories.
 
