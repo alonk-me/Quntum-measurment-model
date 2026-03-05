@@ -1,6 +1,6 @@
-use ndarray::{Array1, Array2};
+use ndarray::{s, Array1, Array2, Array3};
 use num_complex::Complex64;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray2, ToPyArray};
 use pyo3::prelude::*;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -113,7 +113,7 @@ impl RustLQubitSimulator {
         &self,
         py: Python<'py>,
         n_trajectories: usize,
-    ) -> PyResult<(Vec<f64>, Vec<&'py PyArray2<f64>>, Vec<&'py PyArray2<i32>>)> {
+    ) -> PyResult<(&'py PyArray1<f64>, &'py PyArray3<f64>, &'py PyArray3<i32>)> {
         let seed_base: u64 = self.seed.unwrap_or(42);
 
         let results: Vec<(f64, Array2<f64>, Array2<i32>)> = (0..n_trajectories)
@@ -124,15 +124,18 @@ impl RustLQubitSimulator {
             })
             .collect();
 
-        let mut q_vals = Vec::with_capacity(n_trajectories);
-        let mut z_trajs = Vec::with_capacity(n_trajectories);
-        let mut xi_trajs = Vec::with_capacity(n_trajectories);
-        for (q, z, xi) in results {
-            q_vals.push(q);
-            z_trajs.push(z.into_pyarray(py));
-            xi_trajs.push(xi.into_pyarray(py));
+        // Allocate 3D arrays: (n_traj, n_steps+1, L) and (n_traj, n_steps, L)
+        let mut q_vals = Array1::<f64>::zeros(n_trajectories);
+        let mut z_all = Array3::<f64>::zeros((n_trajectories, self.n_steps + 1, self.l));
+        let mut xi_all = Array3::<i32>::zeros((n_trajectories, self.n_steps, self.l));
+        
+        for (i, (q, z, xi)) in results.into_iter().enumerate() {
+            q_vals[i] = q;
+            z_all.slice_mut(s![i, .., ..]).assign(&z);
+            xi_all.slice_mut(s![i, .., ..]).assign(&xi);
         }
-        Ok((q_vals, z_trajs, xi_trajs))
+        
+        Ok((q_vals.to_pyarray(py), z_all.to_pyarray(py), xi_all.to_pyarray(py)))
     }
 
     /// Set the initial correlation matrix from a Python array.
@@ -183,7 +186,10 @@ fn build_g_initial(l: usize) -> Array2<Complex64> {
 }
 
 fn compute_z_values(g: &Array2<Complex64>, l: usize) -> Array1<f64> {
-    Array1::from_iter((0..l).map(|i| 2.0 * g[[i, i]].re - 1.0))
+    Array1::from_iter((0..l).map(|i| {
+        let g_ii_re = g[[i, i]].re.clamp(0.0, 1.0);
+        2.0 * g_ii_re - 1.0
+    }))
 }
 
 fn hamiltonian_step(g: &mut Array2<Complex64>, h: &Array2<Complex64>, dt: f64) {
@@ -216,7 +222,6 @@ pub fn simulate_trajectory_internal(
     z_traj.row_mut(0).assign(&z0);
 
     let mut q = 0.0_f64;
-    let mut step_counter = 0_usize;
 
     for step in 0..n_steps {
         // Hamiltonian step
@@ -227,12 +232,8 @@ pub fn simulate_trajectory_internal(
             .map(|_| if rng.gen::<bool>() { 1 } else { -1 })
             .collect();
 
-        step_counter += 1;
-        let symmetrise = step_counter % 10 == 0;
-        measurement_step_fused(&mut g, &xi, sim.epsilon, symmetrise);
-
-        // If we didn't symmetrise this step, still need to occasionally do it
-        // to prevent drift (covered by the mod-10 check above)
+        // Always symmetrise after measurement (match Python behavior)
+        measurement_step_fused(&mut g, &xi, sim.epsilon, true);
 
         for (k, &xk) in xi.iter().enumerate() {
             xi_traj[[step, k]] = xk;
@@ -250,9 +251,6 @@ pub fn simulate_trajectory_internal(
 
         z_traj.row_mut(step + 1).assign(&z_after);
     }
-
-    // Final hermitianise/clip
-    hermitianise_and_clip(&mut g);
 
     (q, z_traj, xi_traj)
 }

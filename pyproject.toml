@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "quantum-measurements"
-version = "0.1.0"
+version = "0.2.0"
 description = "simulations tools for qubit weak measurements models"
 readme = "README.md"
 authors = [{name = "Alon Kochol"}]

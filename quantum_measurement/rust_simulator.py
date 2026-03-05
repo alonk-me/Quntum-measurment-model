@@ -130,10 +130,7 @@ class FastLQubitSimulator:
         z_trajectories : numpy.ndarray, shape (n_trajectories, N_steps+1, L)
         xi_trajectories : numpy.ndarray, shape (n_trajectories, N_steps, L)
         """
-        q_list, z_list, xi_list = self._sim.simulate_ensemble(n_trajectories)
-        Q_values = np.array(q_list, dtype=float)
-        z_trajectories = np.stack(z_list, axis=0)
-        xi_trajectories = np.stack(xi_list, axis=0)
+        Q_values, z_trajectories, xi_trajectories = self._sim.simulate_ensemble(n_trajectories)
         return Q_values, z_trajectories, xi_trajectories
 
     # ------------------------------------------------------------------
