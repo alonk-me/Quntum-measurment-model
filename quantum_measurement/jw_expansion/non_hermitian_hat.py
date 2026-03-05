@@ -219,7 +219,7 @@ class NonHermitianHatSimulator:
         self, 
         return_G_final: bool = True
     ) -> Tuple[float, np.ndarray] | Tuple[float, np.ndarray, np.ndarray]:
-        """Propagate a single trajectory and compute entropy production.
+        r"""Propagate a single trajectory and compute entropy production.
 
         The correlation matrix is initialised to the vacuum and then
         updated for ``N_steps`` discrete time increments of size ``dt``.
