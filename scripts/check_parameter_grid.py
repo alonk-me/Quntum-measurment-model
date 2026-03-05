@@ -11,8 +11,8 @@ print("PARAMETER GRID ANALYSIS")
 print("="*60)
 
 # Global coverage: log-spaced
-# Updated to match run_ninf_scan.py: starting at 0.1 instead of 0.001
-gamma_log = np.logspace(-1, 2, 80)  # Changed from -3 to -1 (0.1 to 100)
+# Updated to match run_ninf_scan.py: starting at 0.4 for g_min = 0.1
+gamma_log = np.logspace(np.log10(0.4), 2, 80)  # 0.4 to 100 (g: 0.1 to 25)
 
 # Critical region: g ∈ [0.6, 1.4], linear in g
 g_critical = np.linspace(0.6, 1.4, 120)

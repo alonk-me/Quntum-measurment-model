@@ -9,3 +9,5 @@ venv/
 *.csv
 venv/*
 results/*
+*/*.log
+*/*.pid
