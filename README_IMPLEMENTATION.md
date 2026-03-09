@@ -433,8 +433,6 @@ Quntum-measurment-model/
 
 ## 📧 Support
 
-**Workspace:** `/home/alon/Documents/VS_code/Quntum-measurment-model`
-
 **Key files for debugging:**
 - Theory: `docs/theory/analytical_n_inf_theory.md`
 - Logs: `logs/ninf_scan.log`
