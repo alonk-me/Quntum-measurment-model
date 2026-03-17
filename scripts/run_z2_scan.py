@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from quantum_measurement.jw_expansion.l_qubit_correlation_simulator import (
     LQubitCorrelationSimulator,
 )
+from quantum_measurement.parallel import ParameterSweepExecutor
 
 # ============================================================================
 # Configuration Parameters
@@ -156,7 +157,52 @@ def load_existing_results(csv_file):
 # Main sweep
 # ============================================================================
 
-def run_parameter_sweep(csv_file):
+def _run_single_point(L, gamma, backend_device, rng):
+    del rng
+    g = gamma / (4 * J_GLOBAL)
+    T, dt, N_steps, tau = get_time_params(gamma)
+    epsilon = float(np.sqrt(gamma * dt))
+
+    start_time = time.time()
+    sim = LQubitCorrelationSimulator(
+        L=L,
+        J=J_GLOBAL,
+        epsilon=epsilon,
+        N_steps=N_steps,
+        T=T,
+        closed_boundary=True,
+        device=backend_device,
+    )
+    z2_mean = float(sim.simulate_z2_mean())
+    z2_plus_one = 1.0 + z2_mean
+    runtime = time.time() - start_time
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "L": int(L),
+        "gamma": float(gamma),
+        "g": float(g),
+        "z2_mean": z2_mean,
+        "z2_plus_one": z2_plus_one,
+        "tau": float(tau),
+        "T": float(T),
+        "dt": float(dt),
+        "N_steps": int(N_steps),
+        "epsilon": epsilon,
+        "runtime_sec": float(runtime),
+    }
+
+
+def run_parameter_sweep(
+    csv_file,
+    backend_device="cpu",
+    parallel_backend="sequential",
+    n_workers=None,
+    base_seed=42,
+    resume=True,
+    l_values_override=None,
+    gamma_grid_override=None,
+):
     print("=" * 80)
     print("1+<z^2> PARAMETER SWEEP")
     print("=" * 80)
@@ -164,8 +210,12 @@ def run_parameter_sweep(csv_file):
     print(f"CSV file: {csv_file}")
     print()
 
-    L_values = resolve_L_values()
-    gamma_grid = construct_gamma_grid()
+    L_values = sorted({int(v) for v in l_values_override}) if l_values_override is not None else resolve_L_values()
+    gamma_grid = (
+        np.array(sorted({float(v) for v in gamma_grid_override}), dtype=float)
+        if gamma_grid_override is not None
+        else construct_gamma_grid()
+    )
     g_grid = gamma_grid / (4 * J_GLOBAL)
 
     print("Parameter grid:")
@@ -176,86 +226,28 @@ def run_parameter_sweep(csv_file):
     print(f"  Total runs: {len(L_values) * len(gamma_grid)}")
     print()
 
-    if not csv_file.exists():
-        initialize_csv(csv_file)
-        completed = set()
-    else:
+    if resume and csv_file.exists():
         completed = load_existing_results(csv_file)
         print(f"Resuming: {len(completed)} runs already completed")
         print()
 
-    total_runs = len(L_values) * len(gamma_grid)
-    run_count = 0
+    executor = ParameterSweepExecutor(
+        parallel_backend=parallel_backend,
+        n_workers=n_workers,
+        base_seed=base_seed,
+        verbose=True,
+        continue_on_error=True,
+    )
 
-    for L in L_values:
-        print(f"\n{'='*80}")
-        print(f"SYSTEM SIZE: L = {L}")
-        print(f"{'='*80}\n")
-
-        for gamma in gamma_grid:
-            run_count += 1
-
-            if (L, gamma) in completed:
-                continue
-
-            g = gamma / (4 * J_GLOBAL)
-            T, dt, N_steps, tau = get_time_params(gamma)
-            epsilon = float(np.sqrt(gamma * dt))
-
-            progress_pct = 100 * run_count / total_runs
-            print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] Run "
-                f"{run_count}/{total_runs} ({progress_pct:.1f}%)"
-            )
-            print(f"  L={L:3d}, gamma={gamma:8.4f}, g={g:8.4f}")
-            print(f"  T={T:.3e}, dt={dt:.3e}, N_steps={N_steps}, eps={epsilon:.3e}")
-
-            if N_steps >= N_STEPS_WARNING:
-                print(f"  WARNING: N_steps={N_steps} exceeds {N_STEPS_WARNING:.0e}")
-
-            start_time = time.time()
-
-            try:
-                sim = LQubitCorrelationSimulator(
-                    L=L,
-                    J=J_GLOBAL,
-                    epsilon=epsilon,
-                    N_steps=N_steps,
-                    T=T,
-                    closed_boundary=True,
-                )
-                z2_mean = float(sim.simulate_z2_mean())
-                z2_plus_one = 1.0 + z2_mean
-                runtime = time.time() - start_time
-
-                data_dict = {
-                    "timestamp": datetime.now().isoformat(),
-                    "L": L,
-                    "gamma": float(gamma),
-                    "g": float(g),
-                    "z2_mean": z2_mean,
-                    "z2_plus_one": z2_plus_one,
-                    "tau": tau,
-                    "T": T,
-                    "dt": dt,
-                    "N_steps": int(N_steps),
-                    "epsilon": epsilon,
-                    "runtime_sec": runtime,
-                }
-                append_to_csv(csv_file, data_dict)
-
-                print(f"  z2_mean={z2_mean:.6f}, 1+z2={z2_plus_one:.6f}")
-                print(f"  Time: {runtime:.1f}s")
-                print("  SAVED to CSV")
-
-            except Exception as exc:
-                print(f"  ERROR: {exc}")
-                import traceback
-
-                traceback.print_exc()
-                print("  Skipping this point...")
-
-            print()
+    _ = executor.run_sweep(
+        L_values=L_values,
+        gamma_grid=gamma_grid,
+        simulator_factory=_run_single_point,
+        backend_device=backend_device,
+        output_csv=csv_file,
+        resume=resume,
+        csv_header=CSV_HEADER,
+    )
 
     print("=" * 80)
     print("PARAMETER SWEEP COMPLETE")
@@ -378,12 +370,34 @@ def main():
         default=None,
         help="Path to CSV file (resume if exists; create if missing)",
     )
+    parser.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
+    parser.add_argument(
+        "--parallel-backend",
+        choices=["sequential", "multiprocessing"],
+        default="sequential",
+    )
+    parser.add_argument("--n-workers", type=int, default=None)
+    parser.add_argument("--base-seed", type=int, default=42)
+    parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--l-values", nargs="+", type=int, default=None)
+    parser.add_argument("--gamma-values", nargs="+", type=float, default=None)
+    parser.add_argument("--skip-plots", action="store_true")
 
     args = parser.parse_args()
     csv_file = Path(args.csv) if args.csv else DEFAULT_CSV
 
-    run_parameter_sweep(csv_file)
-    generate_verification_plots(csv_file)
+    run_parameter_sweep(
+        csv_file,
+        backend_device=args.device,
+        parallel_backend=args.parallel_backend,
+        n_workers=args.n_workers,
+        base_seed=args.base_seed,
+        resume=(not args.no_resume),
+        l_values_override=args.l_values,
+        gamma_grid_override=args.gamma_values,
+    )
+    if not args.skip_plots:
+        generate_verification_plots(csv_file)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ Date: 2026-01-06
 """
 
 import numpy as np
+import argparse
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend for remote execution
 import matplotlib.pyplot as plt
@@ -45,6 +46,7 @@ import gc
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from quantum_measurement.jw_expansion.non_hermitian_hat import NonHermitianHatSimulator
 from quantum_measurement.jw_expansion.n_infty import sum_pbc, integral_expr
+from quantum_measurement.parallel import ParameterSweepExecutor
 
 # Configure matplotlib for publication-quality plots
 plt.rcParams['figure.dpi'] = 300
@@ -211,8 +213,15 @@ def select_L_values_with_fallback():
 # Adaptive Simulation Function
 # ============================================================================
 
-def simulate_with_adaptive_convergence(L, J, gamma, dt=DT, tolerance=TOLERANCE,
-                                       window_size=WINDOW_SIZE):
+def simulate_with_adaptive_convergence(
+    L,
+    J,
+    gamma,
+    dt=DT,
+    tolerance=TOLERANCE,
+    window_size=WINDOW_SIZE,
+    device="cpu",
+):
     """
     Run time evolution with adaptive stopping and periodic BC.
     
@@ -241,7 +250,8 @@ def simulate_with_adaptive_convergence(L, J, gamma, dt=DT, tolerance=TOLERANCE,
     # Initialize with periodic BC
     sim = NonHermitianHatSimulator(
         L=L, J=J, gamma=gamma, dt=dt, N_steps=max_steps,
-        closed_boundary=True  # Periodic BC for sum_pbc comparison
+        closed_boundary=True,  # Periodic BC for sum_pbc comparison
+        device=device,
     )
     
     # Run simulation ONCE (key fix: no chunks, no restarts)
@@ -359,7 +369,44 @@ def load_existing_results():
 # Main Sweep Loop
 # ============================================================================
 
-def run_parameter_sweep():
+def _run_single_point(L, gamma, backend_device, rng):
+    del rng  # NonHermitianHatSimulator is deterministic for this sweep.
+
+    g = gamma / (4 * J_GLOBAL)
+    n_exact = sum_pbc(g, L)
+    result = simulate_with_adaptive_convergence(L=L, J=J_GLOBAL, gamma=gamma, device=backend_device)
+
+    abs_error = np.abs(result['n_infinity'] - n_exact)
+    rel_error = abs_error / n_exact if n_exact > 0 else np.inf
+
+    return {
+        'timestamp': datetime.now().isoformat(),
+        'L': int(L),
+        'gamma': float(gamma),
+        'g': float(g),
+        'n_inf_sim': float(result['n_infinity']),
+        'n_inf_exact': float(n_exact),
+        'abs_error': float(abs_error),
+        'rel_error': float(rel_error),
+        'converged': int(result['converged']),
+        'steps': int(result['steps']),
+        'convergence_step': int(result['convergence_step']),
+        'max_steps_allocated': int(result['max_steps_allocated']),
+        'runtime_sec': float(result['runtime']),
+    }
+
+
+def run_parameter_sweep(
+    csv_file: Path,
+    backend_device: str,
+    parallel_backend: str,
+    n_workers: int | None,
+    base_seed: int,
+    resume: bool,
+    n_trajectories: int | None = None,
+    l_values_override: list[int] | None = None,
+    gamma_grid_override: list[float] | None = None,
+):
     """Execute full parameter sweep with checkpointing."""
     
     print("="*80)
@@ -368,13 +415,21 @@ def run_parameter_sweep():
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
     
-    # Determine L values with memory fallback
-    L_values, memory_status = select_L_values_with_fallback()
-    print(memory_status)
+    # Determine L values with optional override for smoke/testing runs.
+    if l_values_override is not None:
+        L_values = sorted({int(v) for v in l_values_override})
+        print(f"Using user-provided L values: {L_values}")
+    else:
+        L_values, memory_status = select_L_values_with_fallback()
+        print(memory_status)
     print()
     
-    # Construct gamma grid
-    gamma_grid = construct_gamma_grid()
+    # Construct gamma grid with optional override for smoke/testing runs.
+    if gamma_grid_override is not None:
+        gamma_grid = np.array(sorted({float(v) for v in gamma_grid_override}), dtype=float)
+        print(f"Using user-provided gamma grid with {len(gamma_grid)} points")
+    else:
+        gamma_grid = construct_gamma_grid()
     g_grid = gamma_grid / (4 * J_GLOBAL)
     print(f"Parameter grid:")
     print(f"  L values: {L_values}")
@@ -382,104 +437,49 @@ def run_parameter_sweep():
     print(f"  g range: [{g_grid.min():.3e}, {g_grid.max():.3e}]")
     print(f"  N_γ points: {len(gamma_grid)}")
     print(f"  Total runs: {len(L_values) * len(gamma_grid)}")
+    if n_trajectories is not None:
+        print(f"  n_trajectories argument provided ({n_trajectories}) but this scan uses deterministic adaptive evolution per point.")
     print()
     
-    # Initialize or resume
-    if not CSV_FILE.exists():
-        initialize_csv()
-        completed = set()
-    else:
-        completed = load_existing_results()
+    if resume and csv_file.exists():
+        completed = load_existing_results() if csv_file == CSV_FILE else set()
+        if csv_file != CSV_FILE:
+            with open(csv_file, 'r') as f:
+                reader = csv.DictReader(f)
+                completed = {(int(row['L']), float(row['gamma'])) for row in reader}
         print(f"⟳ Resuming: {len(completed)} runs already completed")
         print()
-    
-    # Main loop
-    total_runs = len(L_values) * len(gamma_grid)
-    run_count = 0
-    skipped_count = len(completed)
-    
-    for L in L_values:
-        print(f"\n{'='*80}")
-        print(f"SYSTEM SIZE: L = {L}")
-        print(f"{'='*80}\n")
-        
-        for i, gamma in enumerate(gamma_grid):
-            run_count += 1
-            
-            # Skip if already computed
-            if (L, gamma) in completed:
-                continue
-            
-            g = gamma / (4 * J_GLOBAL)
-            
-            # Analytical reference
-            n_exact = sum_pbc(g, L)
-            
-            # Progress header
-            progress_pct = 100 * run_count / total_runs
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Run {run_count}/{total_runs} ({progress_pct:.1f}%)")
-            print(f"  L={L:3d}, γ={gamma:8.4f}, g={g:8.4f}")
-            
-            # Run simulation
-            try:
-                result = simulate_with_adaptive_convergence(
-                    L=L, J=J_GLOBAL, gamma=gamma
-                )
-                
-                # Compute errors
-                abs_error = np.abs(result['n_infinity'] - n_exact)
-                rel_error = abs_error / n_exact if n_exact > 0 else np.inf
-                
-                # Log results
-                status = "✓ CONVERGED" if result['converged'] else "⚠ MAX_STEPS"
-                print(f"  {status}: n_∞^sim={result['n_infinity']:.6f}, n_∞^exact={n_exact:.6f}")
-                print(f"  Error: abs={abs_error:.2e}, rel={rel_error:.2e}")
-                print(f"  Steps: {result['steps']}, Time: {result['runtime']:.1f}s")
-                
-                # Save to CSV
-                data_dict = {
-                    'timestamp': datetime.now().isoformat(),
-                    'L': L,
-                    'gamma': gamma,
-                    'g': g,
-                    'n_inf_sim': result['n_infinity'],
-                    'n_inf_exact': n_exact,
-                    'abs_error': abs_error,
-                    'rel_error': rel_error,
-                    'converged': int(result['converged']),
-                    'steps': result['steps'],
-                    'convergence_step': result['convergence_step'],
-                    'max_steps_allocated': result['max_steps_allocated'],
-                    'runtime_sec': result['runtime']
-                }
-                append_to_csv(data_dict)
-                
-                print(f"  💾 SAVED to CSV")
-                
-                # Clean up large arrays
-                del result
-                gc.collect()
-                
-            except Exception as e:
-                print(f"  ✗ ERROR: {e}")
-                import traceback
-                traceback.print_exc()
-                print(f"  Skipping this point...")
-            
-            print()
+
+    executor = ParameterSweepExecutor(
+        parallel_backend=parallel_backend,
+        n_workers=n_workers,
+        base_seed=base_seed,
+        verbose=True,
+        continue_on_error=True,
+    )
+
+    _ = executor.run_sweep(
+        L_values=L_values,
+        gamma_grid=gamma_grid,
+        simulator_factory=_run_single_point,
+        backend_device=backend_device,
+        output_csv=csv_file,
+        resume=resume,
+        csv_header=CSV_HEADER,
+    )
     
     print("="*80)
     print("PARAMETER SWEEP COMPLETE")
     print("="*80)
     print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Results saved to: {CSV_FILE}")
+    print(f"Results saved to: {csv_file}")
     print()
 
 # ============================================================================
 # Post-Processing: Generate Plots
 # ============================================================================
 
-def generate_verification_plots():
+def generate_verification_plots(csv_file: Path):
     """Generate all scientific verification plots from CSV data."""
     
     print("\nGenerating verification plots...")
@@ -487,12 +487,12 @@ def generate_verification_plots():
     import pandas as pd
     
     # Load data
-    if not CSV_FILE.exists():
+    if not csv_file.exists():
         print("✗ No CSV file found, skipping plots")
         return
     
-    df = pd.read_csv(CSV_FILE)
-    print(f"✓ Loaded {len(df)} data points from {CSV_FILE.name}")
+    df = pd.read_csv(csv_file)
+    print(f"✓ Loaded {len(df)} data points from {csv_file.name}")
     
     # Plot 1: n_∞(g) for all L with exact curve
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -528,7 +528,7 @@ def generate_verification_plots():
     ax.set_ylim(0, 0.5)
     
     plt.tight_layout()
-    plot_file = RESULTS_DIR / f"ninf_vs_g__BC-pbc__all-L__{TIMESTAMP}.png"
+    plot_file = RESULTS_DIR / f"ninf_vs_g__BC-pbc__all-L__{csv_file.stem}.png"
     plt.savefig(plot_file, dpi=300, bbox_inches='tight')
     print(f"  ✓ Saved: {plot_file.name}")
     plt.close()
@@ -567,7 +567,7 @@ def generate_verification_plots():
     ax.grid(True, alpha=0.3, which='both')
     
     plt.tight_layout()
-    plot_file = RESULTS_DIR / f"error_analysis__{TIMESTAMP}.png"
+    plot_file = RESULTS_DIR / f"error_analysis__{csv_file.stem}.png"
     plt.savefig(plot_file, dpi=300, bbox_inches='tight')
     print(f"  ✓ Saved: {plot_file.name}")
     plt.close()
@@ -605,7 +605,7 @@ def generate_verification_plots():
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plot_file = RESULTS_DIR / f"ninf_critical_region__g-near-1__{TIMESTAMP}.png"
+    plot_file = RESULTS_DIR / f"ninf_critical_region__g-near-1__{csv_file.stem}.png"
     plt.savefig(plot_file, dpi=300, bbox_inches='tight')
     print(f"  ✓ Saved: {plot_file.name}")
     plt.close()
@@ -616,7 +616,28 @@ def generate_verification_plots():
 # Entry Point
 # ============================================================================
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(
+        description="n_inf(gamma) sweep with optional multiprocessing execution",
+    )
+    parser.add_argument("--output-csv", type=str, default=str(CSV_FILE))
+    parser.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
+    parser.add_argument(
+        "--parallel-backend",
+        choices=["sequential", "multiprocessing", "ray"],
+        default="sequential",
+    )
+    parser.add_argument("--n-workers", type=int, default=None)
+    parser.add_argument("--n-trajectories", type=int, default=None)
+    parser.add_argument("--base-seed", type=int, default=42)
+    parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--l-values", nargs="+", type=int, default=None)
+    parser.add_argument("--gamma-values", nargs="+", type=float, default=None)
+    parser.add_argument("--skip-plots", action="store_true")
+    args = parser.parse_args()
+
+    csv_file = Path(args.output_csv)
+
     print("\n" + "="*80)
     print("QUANTUM MEASUREMENT MODEL: n_∞(γ) VERIFICATION")
     print("="*80)
@@ -627,10 +648,21 @@ if __name__ == "__main__":
     
     try:
         # Run parameter sweep
-        run_parameter_sweep()
+        run_parameter_sweep(
+            csv_file=csv_file,
+            backend_device=args.device,
+            parallel_backend=args.parallel_backend,
+            n_workers=args.n_workers,
+            base_seed=args.base_seed,
+            resume=(not args.no_resume),
+            n_trajectories=args.n_trajectories,
+            l_values_override=args.l_values,
+            gamma_grid_override=args.gamma_values,
+        )
         
         # Generate plots
-        generate_verification_plots()
+        if not args.skip_plots:
+            generate_verification_plots(csv_file)
         
         print("\n" + "="*80)
         print("✓ ALL TASKS COMPLETED SUCCESSFULLY")
@@ -646,3 +678,7 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
