@@ -18,15 +18,15 @@ def is_cupy_available() -> bool:
         return False
 
 
-def get_backend(device: str = "cpu") -> Backend:
+def get_backend(device: str = "cpu", seed: int | None = None) -> Backend:
     device_lower = device.lower()
     if device_lower in {"cpu", "numpy"}:
-        return NumPyBackend()
+        return NumPyBackend(seed=seed)
     if device_lower in {"gpu", "cuda", "cupy"}:
         if is_cupy_available():
-            return CuPyBackend()
+            return CuPyBackend(seed=seed)
         warnings.warn("GPU backend requested but CuPy/CUDA unavailable; falling back to NumPy backend.", RuntimeWarning)
-        return NumPyBackend()
+        return NumPyBackend(seed=seed)
     raise ValueError(f"Unsupported device '{device}'. Use 'cpu' or 'gpu'.")
 
 

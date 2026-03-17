@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Tuple
 
 from quantum_measurement.backends import Backend, get_backend
+from quantum_measurement.utilities.gpu_utils import estimate_trajectory_batch_size
 
 
 @dataclass
@@ -161,6 +162,115 @@ class SSEWavefunctionSimulator:
 
         return psi_new, xi, z_before
 
+    def _expectation_value_z_batch(self, psi_batch: Any) -> np.ndarray:
+        """Calculate ⟨σ_z⟩ for a batch of wavefunctions of shape (n_batch, 2)."""
+        n0 = self.backend.real(self.backend.conj(psi_batch[:, 0]) * psi_batch[:, 0])
+        n1 = self.backend.real(self.backend.conj(psi_batch[:, 1]) * psi_batch[:, 1])
+        z = n0 - n1
+        return self.backend.asnumpy(z).astype(float)
+
+    def _apply_hamiltonian_evolution_batch(self, psi_batch: Any, dt: float) -> Any:
+        """Apply Hamiltonian evolution to a batch of wavefunctions."""
+        if abs(self.J) < 1e-15:
+            return psi_batch
+
+        angle = 2 * np.pi * self.epsilon**2
+        cos_angle = np.cos(angle)
+        sin_angle = np.sin(angle)
+        U = cos_angle * self.identity - 1j * sin_angle * self.sigma_y
+
+        # (B,2) @ (2,2)^T keeps row-major batch layout.
+        return self.backend.matmul(psi_batch, self.backend.transpose(U))
+
+    def _measurement_update_batch(self, psi_batch: Any, xi_step: Any) -> Tuple[Any, np.ndarray]:
+        """Apply a discrete measurement step to a batch.
+
+        Parameters
+        ----------
+        psi_batch : backend array
+            Shape (n_batch, 2).
+        xi_step : backend array
+            Shape (n_batch,) with values in {-1, +1}.
+        """
+        z_before = self._expectation_value_z_batch(psi_batch)
+        z_before_dev = self.backend.array(z_before)
+
+        # Diagonal operator sigma_z - z*I for each trajectory in the batch.
+        sigma_minus = self.backend.get_workspace("sse_sigma_minus", (psi_batch.shape[0], 2, 2), complex)
+        sigma_minus[:, 0, 0] = 1.0 - z_before_dev
+        sigma_minus[:, 1, 1] = -1.0 - z_before_dev
+
+        psi_col = psi_batch[:, :, None]
+        first_order = xi_step[:, None] * self.epsilon * 0.5 * self.backend.matmul(sigma_minus, psi_col)[:, :, 0]
+
+        second_order_op = -0.5 * (self.epsilon**2) * 0.25 * self.backend.matmul(sigma_minus, sigma_minus)
+        second_order = self.backend.matmul(second_order_op, psi_col)[:, :, 0]
+
+        psi_new = psi_batch + first_order + second_order
+
+        # Normalize each trajectory while avoiding full host-device state copies.
+        norm_sq = self.backend.real(
+            self.backend.conj(psi_new[:, 0]) * psi_new[:, 0]
+            + self.backend.conj(psi_new[:, 1]) * psi_new[:, 1]
+        )
+        norms = np.sqrt(np.maximum(self.backend.asnumpy(norm_sq), 0.0))
+        norms = np.where(norms > 1e-15, norms, 1.0)
+        psi_new = psi_new / self.backend.array(norms)[:, None]
+
+        return psi_new, z_before
+
+    def simulate_trajectory_batch(
+        self,
+        n_batch: int,
+        xi_batch: Any | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Simulate a batch of stochastic trajectories in parallel.
+
+        Parameters
+        ----------
+        n_batch : int
+            Number of trajectories in this batch.
+        xi_batch : backend/NumPy array | None
+            Optional pre-generated outcomes with shape (n_batch, N_steps).
+            If omitted, outcomes are sampled from backend-owned RNG.
+        """
+        if n_batch < 1:
+            raise ValueError("n_batch must be at least 1")
+
+        if xi_batch is None:
+            xi_batch_dev = self.backend.choice_pm1((n_batch, self.N_steps))
+        else:
+            xi_batch_dev = self.backend.array(xi_batch)
+
+        psi_batch = self.backend.zeros((n_batch, 2), dtype=complex)
+        for idx in range(n_batch):
+            psi_batch[idx] = self.psi_initial
+
+        z_trajectory = np.zeros((n_batch, self.N_steps + 1), dtype=float)
+        measurement_results = np.zeros((n_batch, self.N_steps), dtype=int)
+        Q_values = np.zeros(n_batch, dtype=float)
+
+        z_trajectory[:, 0] = self._expectation_value_z_batch(psi_batch)
+        dt = 1.0 / self.N_steps
+
+        for i in range(self.N_steps):
+            if abs(self.J) > 1e-15:
+                psi_batch = self._apply_hamiltonian_evolution_batch(psi_batch, dt)
+
+            xi_step = xi_batch_dev[:, i]
+            psi_batch, z_before = self._measurement_update_batch(psi_batch, xi_step)
+
+            xi_step_np = self.backend.asnumpy(xi_step).astype(int)
+            measurement_results[:, i] = xi_step_np
+
+            z_after = self._expectation_value_z_batch(psi_batch)
+            z_trajectory[:, i + 1] = z_after
+
+            Q_values += 2.0 * self.epsilon * xi_step_np * 0.5 * (z_before + z_after)
+            Q_values += 2.0 * (self.epsilon**2) * z_before * 0.5 * (z_before + z_after)
+
+        return Q_values, z_trajectory, measurement_results
+
     def simulate_trajectory(self) -> Tuple[float, np.ndarray, np.ndarray]:
         """Simulate a single stochastic trajectory.
         
@@ -210,7 +320,12 @@ class SSEWavefunctionSimulator:
 
         return Q, z_trajectory, measurement_results
 
-    def simulate_ensemble(self, n_trajectories: int, progress: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def simulate_ensemble(
+        self,
+        n_trajectories: int,
+        progress: bool = False,
+        batch_size: int | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Simulate an ensemble of trajectories.
         
         Parameters:
@@ -232,22 +347,31 @@ class SSEWavefunctionSimulator:
         z_trajectories = np.zeros((n_trajectories, self.N_steps + 1))
         measurement_results = np.zeros((n_trajectories, self.N_steps), dtype=int)
 
+        if batch_size is None:
+            if self.backend.is_gpu:
+                batch_size = min(n_trajectories, estimate_trajectory_batch_size(1))
+            else:
+                batch_size = 1
+        batch_size = max(1, int(batch_size))
+
         # Set up iterator with optional tqdm progress bar
         if progress:
             try:
                 from tqdm import tqdm
-                iterator = tqdm(range(n_trajectories), desc="Simulating trajectories")
+                iterator = tqdm(range(0, n_trajectories, batch_size), desc="Simulating trajectories")
             except ImportError:
                 # Fallback if tqdm not available
-                iterator = range(n_trajectories)
+                iterator = range(0, n_trajectories, batch_size)
         else:
-            iterator = range(n_trajectories)
+            iterator = range(0, n_trajectories, batch_size)
 
-        for i in iterator:
-            Q, z_traj, meas_results = self.simulate_trajectory()
-            Q_values[i] = Q
-            z_trajectories[i] = z_traj
-            measurement_results[i] = meas_results
+        for start_idx in iterator:
+            end_idx = min(start_idx + batch_size, n_trajectories)
+            current_batch = end_idx - start_idx
+            Q_batch, z_batch, meas_batch = self.simulate_trajectory_batch(current_batch)
+            Q_values[start_idx:end_idx] = Q_batch
+            z_trajectories[start_idx:end_idx] = z_batch
+            measurement_results[start_idx:end_idx] = meas_batch
 
         return Q_values, z_trajectories, measurement_results
 

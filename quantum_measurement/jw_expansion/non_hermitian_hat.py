@@ -195,6 +195,10 @@ class NonHermitianHatSimulator:
         comm = self.backend.matmul(G, self.h) - self.backend.matmul(self.h, G)
         return G + (-2.0j * self.dt) * comm
 
+    def _hamiltonian_step_batch(self, G_batch: Any) -> Any:
+        """One Euler step of coherent evolution for a batch of states."""
+        return self.backend.batched_commutator_update(G_batch, self.h, self.dt)
+
     def _nonhermitian_step(self, G: Any) -> Any:
         """One Euler step of imaginary‑potential evolution.
 
@@ -214,6 +218,17 @@ class NonHermitianHatSimulator:
         
         return G + delta_G
 
+    def _nonhermitian_step_batch(self, G_batch: Any) -> Any:
+        """One Euler step of imaginary-potential evolution for a batch."""
+        sigma_diag = np.concatenate([np.ones(self.L), -np.ones(self.L)])
+        sigma_z = self.backend.array(self.backend.diag(sigma_diag), dtype=complex)
+
+        term1 = self.backend.matmul(self.backend.matmul(G_batch, sigma_z), G_batch)
+        term2 = 0.5 * (self.backend.matmul(sigma_z, G_batch) + self.backend.matmul(G_batch, sigma_z))
+        delta_G = self.dt * self.gamma * (term1 - term2)
+
+        return G_batch + delta_G
+
     def _compute_n_values(self, G: Any) -> np.ndarray:
         """Compute occupations ``⟨n_i⟩`` from the covariance matrix.
 
@@ -224,11 +239,60 @@ class NonHermitianHatSimulator:
         diag_real = self.backend.asnumpy(self.backend.real(self.backend.diag(G)))
         return diag_real[: self.L]
 
+    def _compute_n_values_batch(self, G_batch: Any) -> np.ndarray:
+        """Compute occupations for a batch with shape (B, 2L, 2L)."""
+        diag_real = self.backend.real(G_batch[:, range(self.L), range(self.L)])
+        return self.backend.asnumpy(diag_real)
+
+    def simulate_trajectory_batch(
+        self,
+        n_batch: int,
+        return_G_final: bool = True,
+    ) -> Tuple[np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Propagate a batch of deterministic trajectories.
+
+        Parameters
+        ----------
+        n_batch : int
+            Number of trajectories to run in parallel.
+        return_G_final : bool, optional
+            If True, return final correlation matrices for each trajectory.
+        """
+        if n_batch < 1:
+            raise ValueError("n_batch must be at least 1")
+
+        dim = 2 * self.L
+        G_batch = self.backend.zeros((n_batch, dim, dim), dtype=complex)
+        for idx in range(n_batch):
+            G_batch[idx] = self.G_initial
+
+        n_traj = np.zeros((n_batch, self.N_steps + 1, self.L), dtype=float)
+        n_traj[:, 0, :] = self._compute_n_values_batch(G_batch)
+        Q = np.zeros(n_batch, dtype=float)
+
+        for step in range(self.N_steps):
+            n_before = n_traj[:, step, :]
+
+            G_batch = self._hamiltonian_step_batch(G_batch)
+            G_batch = self._nonhermitian_step_batch(G_batch)
+
+            G_batch = self.backend.symmetrize_clip_diag_inplace(G_batch)
+
+            n_after = self._compute_n_values_batch(G_batch)
+            n_traj[:, step + 1, :] = n_after
+
+            n_avg = 0.5 * (n_before + n_after)
+            Q += self.gamma * self.dt * np.sum(1.0 - 2 * n_avg, axis=1)
+
+        if return_G_final:
+            return Q, n_traj, self.backend.asnumpy(G_batch)
+        return Q, n_traj
+
     def simulate_trajectory(
         self, 
         return_G_final: bool = True
     ) -> Tuple[float, np.ndarray] | Tuple[float, np.ndarray, np.ndarray]:
-        """Propagate a single trajectory and compute entropy production.
+        r"""Propagate a single trajectory and compute entropy production.
 
         The correlation matrix is initialised to the vacuum and then
         updated for ``N_steps`` discrete time increments of size ``dt``.

@@ -180,6 +180,30 @@ class TestSimulateTrajectory:
         Q, _, _ = sim.simulate_trajectory()
         assert np.isfinite(Q)
 
+    def test_batch_size_one_parity(self, minimal_params_correlation):
+        """Batch n=1 should match serial trajectory for the same xi sequence."""
+        params = dict(minimal_params_correlation)
+        seed = 123
+        params["rng"] = np.random.default_rng(seed)
+        sim = LQubitCorrelationSimulator(**params)
+
+        Q_serial, z_serial, xi_serial = sim.simulate_trajectory()
+
+        rng_for_xi = np.random.default_rng(seed)
+        xi_batch = rng_for_xi.choice([-1, 1], size=(1, sim.N_steps, sim.L)).astype(np.int8)
+        Q_batch, z_batch, xi_out = sim.simulate_trajectory_batch(1, xi_batch=xi_batch)
+
+        assert np.allclose(Q_batch[0], Q_serial, atol=1e-12)
+        assert np.allclose(z_batch[0], z_serial, atol=1e-12)
+        assert np.array_equal(xi_out[0], xi_serial)
+
+    def test_batch_shapes(self, minimal_params_correlation):
+        sim = LQubitCorrelationSimulator(**minimal_params_correlation)
+        Q, z, xi = sim.simulate_trajectory_batch(3)
+        assert Q.shape == (3,)
+        assert z.shape == (3, sim.N_steps + 1, sim.L)
+        assert xi.shape == (3, sim.N_steps, sim.L)
+
 
 class TestSimulateEnsemble:
     """Tests for simulate_ensemble."""
@@ -196,3 +220,10 @@ class TestSimulateEnsemble:
         sim = LQubitCorrelationSimulator(**minimal_params_correlation)
         Q_vals, _, _ = sim.simulate_ensemble(5)
         assert np.all(np.isfinite(Q_vals))
+
+    def test_ensemble_batch_shapes(self, minimal_params_correlation):
+        sim = LQubitCorrelationSimulator(**minimal_params_correlation)
+        Q_vals, z_series, xi_series = sim.simulate_ensemble(7, batch_size=3)
+        assert Q_vals.shape == (7,)
+        assert z_series.shape == (7, sim.N_steps + 1, sim.L)
+        assert xi_series.shape == (7, sim.N_steps, sim.L)

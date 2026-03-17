@@ -54,6 +54,7 @@ from typing import Any, Optional, Tuple
 import numpy as np
 
 from quantum_measurement.backends import Backend, get_backend
+from quantum_measurement.utilities.gpu_utils import estimate_trajectory_batch_size
 
 
 @dataclass
@@ -267,6 +268,100 @@ class LQubitCorrelationSimulator:
 
         return G_new, xi
 
+    def _compute_z_values_batch(self, G_batch: Any) -> np.ndarray:
+        """Compute z values for a batch of correlation matrices.
+
+        Parameters
+        ----------
+        G_batch : backend array
+            Shape (n_batch, 2L, 2L)
+        """
+        diag = self.backend.real(G_batch[:, range(self.L), range(self.L)])
+        z = 2.0 * self.backend.asnumpy(diag) - 1.0
+        return z.astype(float)
+
+    def _hamiltonian_step_batch(self, G_batch: Any) -> Any:
+        """Apply Hamiltonian step to a batch of trajectories."""
+        return self.backend.batched_commutator_update(G_batch, self.h, self.dt)
+
+    def _measurement_step_batch(self, G_batch: Any, xi_step: Any) -> Any:
+        """Apply measurement evolution to a batch for one time step."""
+        n_batch = int(G_batch.shape[0])
+        dim = 2 * self.L
+
+        xi_hat = self.backend.get_workspace("lq_xi_hat", (n_batch, dim, dim), complex)
+        for site in range(self.L):
+            xi_hat[:, site, site] = xi_step[:, site]
+            xi_hat[:, site + self.L, site + self.L] = -xi_step[:, site]
+
+        stochastic = self.epsilon * (
+            self.backend.matmul(G_batch, xi_hat)
+            + self.backend.matmul(xi_hat, G_batch)
+            - 2.0 * self.backend.matmul(self.backend.matmul(G_batch, xi_hat), G_batch)
+        )
+
+        damping = - (self.epsilon ** 2) * G_batch
+
+        G_new = G_batch + stochastic + damping
+        for idx in range(dim):
+            G_new[:, idx, idx] += (self.epsilon ** 2) * G_batch[:, idx, idx]
+
+        G_new = self.backend.symmetrize_clip_diag_inplace(G_new)
+
+        return G_new
+
+    def simulate_trajectory_batch(
+        self,
+        n_batch: int,
+        xi_batch: Any | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Simulate a batch of measurement trajectories in parallel.
+
+        Parameters
+        ----------
+        n_batch : int
+            Number of trajectories to simulate in this batch.
+        xi_batch : backend/NumPy array | None
+            Optional pre-generated ±1 measurement outcomes with shape
+            (n_batch, N_steps, L).
+        """
+        if n_batch < 1:
+            raise ValueError("n_batch must be at least 1")
+
+        if xi_batch is None:
+            xi_batch_dev = self.backend.choice_pm1((n_batch, self.N_steps, self.L))
+        else:
+            xi_batch_dev = self.backend.array(xi_batch)
+
+        G_batch = self.backend.zeros((n_batch, 2 * self.L, 2 * self.L), dtype=complex)
+        for idx in range(n_batch):
+            G_batch[idx] = self.G_initial
+
+        z_traj = np.zeros((n_batch, self.N_steps + 1, self.L), dtype=float)
+        xi_traj = np.zeros((n_batch, self.N_steps, self.L), dtype=int)
+        Q = np.zeros(n_batch, dtype=float)
+
+        z_traj[:, 0, :] = self._compute_z_values_batch(G_batch)
+
+        for step in range(self.N_steps):
+            z_before = z_traj[:, step, :]
+
+            G_batch = self._hamiltonian_step_batch(G_batch)
+
+            xi_step = xi_batch_dev[:, step, :]
+            G_batch = self._measurement_step_batch(G_batch, xi_step)
+            xi_step_np = self.backend.asnumpy(xi_step).astype(int)
+            xi_traj[:, step, :] = xi_step_np
+
+            z_after = self._compute_z_values_batch(G_batch)
+            z_traj[:, step + 1, :] = z_after
+
+            avg_z = 0.5 * (z_before + z_after)
+            Q += np.sum(2.0 * (self.epsilon ** 2) * z_before * avg_z, axis=1)
+            Q += np.sum(2.0 * self.epsilon * xi_step_np * avg_z, axis=1)
+
+        return Q, z_traj, xi_traj
+
     def simulate_trajectory(self) -> Tuple[float, np.ndarray, np.ndarray]:
         r"""Simulate a single measurement trajectory.
 
@@ -352,7 +447,12 @@ class LQubitCorrelationSimulator:
         total_samples = (self.N_steps + 1) * self.L
         return sum_z2 / total_samples
 
-    def simulate_ensemble(self, n_trajectories: int, progress: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def simulate_ensemble(
+        self,
+        n_trajectories: int,
+        progress: bool = False,
+        batch_size: int | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Simulate an ensemble of measurement trajectories.
 
         Parameters
@@ -378,20 +478,29 @@ class LQubitCorrelationSimulator:
         z_series = np.zeros((n_trajectories, self.N_steps + 1, self.L), dtype=float)
         xi_series = np.zeros((n_trajectories, self.N_steps, self.L), dtype=int)
 
+        if batch_size is None:
+            if self.backend.is_gpu:
+                batch_size = min(n_trajectories, estimate_trajectory_batch_size(self.L))
+            else:
+                batch_size = 1
+        batch_size = max(1, int(batch_size))
+
         if progress:
             try:
                 from tqdm import tqdm
-                iterator = tqdm(range(n_trajectories), desc="Simulating trajectories")
+                iterator = tqdm(range(0, n_trajectories, batch_size), desc="Simulating trajectories")
             except ImportError:
-                iterator = range(n_trajectories)
+                iterator = range(0, n_trajectories, batch_size)
         else:
-            iterator = range(n_trajectories)
+            iterator = range(0, n_trajectories, batch_size)
 
-        for idx in iterator:
-            Q, z_traj, xi_traj = self.simulate_trajectory()
-            Q_values[idx] = Q
-            z_series[idx] = z_traj
-            xi_series[idx] = xi_traj
+        for start_idx in iterator:
+            end_idx = min(start_idx + batch_size, n_trajectories)
+            current_batch = end_idx - start_idx
+            Q_batch, z_batch, xi_batch = self.simulate_trajectory_batch(current_batch)
+            Q_values[start_idx:end_idx] = Q_batch
+            z_series[start_idx:end_idx] = z_batch
+            xi_series[start_idx:end_idx] = xi_batch
 
         return Q_values, z_series, xi_series
 

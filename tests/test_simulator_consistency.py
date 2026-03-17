@@ -70,6 +70,31 @@ class TestTwoQubitVsLQubit:
 
         assert z2.shape[0] == zL.shape[0]  # Same number of time points
 
+    def test_two_qubit_batch_size_one_parity(self):
+        """Batch path with n_batch=1 should match serial trajectory for identical xi sequence."""
+        seed = 123
+        n_steps = 40
+        rng_for_serial = np.random.default_rng(seed)
+        rng_for_xi = np.random.default_rng(seed)
+
+        sim = TwoQubitCorrelationSimulator(J=1.0, epsilon=0.1, N_steps=n_steps, T=1.0, rng=rng_for_serial)
+        Q_serial, z_serial, xi_serial = sim.simulate_trajectory()
+
+        xi_random = rng_for_xi.random((1, n_steps, 2))
+        xi_batch = np.where(xi_random < 0.5, 1, -1).astype(np.int8)
+        Q_batch, z_batch, xi_out = sim.simulate_trajectory_batch(1, xi_batch=xi_batch)
+
+        assert np.allclose(Q_batch[0], Q_serial, atol=1e-12)
+        assert np.allclose(z_batch[0], z_serial, atol=1e-12)
+        assert np.array_equal(xi_out[0], xi_serial)
+
+    def test_two_qubit_ensemble_batch_shapes(self):
+        sim = TwoQubitCorrelationSimulator(J=1.0, epsilon=0.1, N_steps=20, T=1.0, rng=np.random.default_rng(5))
+        Q, z, xi = sim.simulate_ensemble(7, batch_size=3)
+        assert Q.shape == (7,)
+        assert z.shape == (7, 21, 2)
+        assert xi.shape == (7, 20, 2)
+
 
 @pytest.mark.integration
 class TestLQubitEnsembleConsistency:

@@ -172,6 +172,37 @@ Interactive Jupyter notebooks demonstrate the simulators:
 
 ## Development
 
+### Benchmarking Batch Size
+
+Use the benchmark script to measure trajectories/second for different batch sizes:
+
+```bash
+python scripts/benchmark_gpu_speedup.py \
+   --simulator two_qubit \
+   --n-steps 200 \
+   --n-trajectories 128 \
+   --batch-sizes 1 2 4 8 16 32 64 \
+   --repeats 3
+```
+
+Optionally save results for plotting or comparison:
+
+```bash
+python scripts/benchmark_gpu_speedup.py \
+   --simulator l_qubit \
+   --L 8 \
+   --n-steps 200 \
+   --n-trajectories 128 \
+   --batch-sizes 4 8 16 32 64 128 \
+   --repeats 3 \
+   --csv docs/reports/benchmark_l_qubit.csv
+```
+
+Recommended sweep settings:
+- Start with powers of two (`1 2 4 8 16 32 64`) to find the throughput knee quickly.
+- For GPU runs, increase to `128` or `256` only if memory allows and throughput is still rising.
+- Keep `n-trajectories >= 128` and `repeats >= 3` for stable comparisons.
+
 ### Running Tests
 ```bash
 # Test SSE functionality

@@ -99,6 +99,30 @@ class TestNonHermitianHatSimulator:
         n_reasonable = np.sum((eigs >= -0.2) & (eigs <= 1.2))
         assert n_reasonable >= len(eigs) * 0.7  # At least 70%
 
+    def test_batch_shapes_with_g_final(self, minimal_params):
+        sim = NonHermitianHatSimulator(**minimal_params)
+        Q_batch, n_batch, G_batch = sim.simulate_trajectory_batch(3, return_G_final=True)
+
+        assert Q_batch.shape == (3,)
+        assert n_batch.shape == (3, minimal_params['N_steps'] + 1, minimal_params['L'])
+        assert G_batch.shape == (3, 2 * minimal_params['L'], 2 * minimal_params['L'])
+
+    def test_batch_shapes_without_g_final(self, minimal_params):
+        sim = NonHermitianHatSimulator(**minimal_params)
+        Q_batch, n_batch = sim.simulate_trajectory_batch(3, return_G_final=False)
+
+        assert Q_batch.shape == (3,)
+        assert n_batch.shape == (3, minimal_params['N_steps'] + 1, minimal_params['L'])
+
+    def test_batch_size_one_parity(self, minimal_params):
+        sim = NonHermitianHatSimulator(**minimal_params)
+        Q_single, n_single, G_single = sim.simulate_trajectory(return_G_final=True)
+        Q_batch, n_batch, G_batch = sim.simulate_trajectory_batch(1, return_G_final=True)
+
+        assert np.allclose(Q_batch[0], Q_single, atol=1e-12)
+        assert np.allclose(n_batch[0], n_single, atol=1e-12)
+        assert np.allclose(G_batch[0], G_single, atol=1e-12)
+
 
 class TestNonHermitianSpinSimulator:
     """Tests for NonHermitianSpinSimulator class."""
