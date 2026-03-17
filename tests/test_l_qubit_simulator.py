@@ -41,6 +41,13 @@ class TestLQubitInitialization:
         sim = LQubitCorrelationSimulator(rng=None)
         assert sim.rng is not None
 
+    def test_accepts_device_cpu(self):
+        sim = LQubitCorrelationSimulator(device="cpu", N_steps=5, rng=np.random.default_rng(1))
+        Q, z_traj, xi_traj = sim.simulate_trajectory()
+        assert np.isfinite(Q)
+        assert z_traj.shape == (6, sim.L)
+        assert xi_traj.shape == (5, sim.L)
+
 
 class TestBuildHamiltonian:
     """Tests for _build_hamiltonian."""

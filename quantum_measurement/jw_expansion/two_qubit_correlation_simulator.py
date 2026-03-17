@@ -20,8 +20,10 @@ Initial state: |↑↑⟩ corresponds to G = diag(1, 1, 0, 0)
 
 from __future__ import annotations
 import numpy as np
-from typing import Tuple, Optional
+from typing import Any, Tuple
 from dataclasses import dataclass, field
+
+from quantum_measurement.backends import Backend, get_backend
 
 
 @dataclass
@@ -46,9 +48,13 @@ class TwoQubitCorrelationSimulator:
     epsilon: float = 0.1
     N_steps: int = 1000
     T: float = 1.0
+    device: str = "cpu"
+    backend: Backend | None = field(default=None, repr=False)
     rng: np.random.Generator | None = field(default=None, repr=False)
     
     def __post_init__(self):
+        if self.backend is None:
+            self.backend = get_backend(self.device)
         if self.rng is None:
             self.rng = np.random.default_rng()
         self.dt = self.T / self.N_steps
@@ -59,9 +65,9 @@ class TwoQubitCorrelationSimulator:
         
         # Initial correlation matrix for |↑↑⟩ state
         # In fermion language: both sites occupied
-        self.G_initial = np.diag([1.0, 1.0, 0.0, 0.0]).astype(complex)
+        self.G_initial = self.backend.array(self.backend.diag([1.0, 1.0, 0.0, 0.0]), dtype=complex)
     
-    def _build_hamiltonian(self) -> np.ndarray:
+    def _build_hamiltonian(self) -> Any:
         """
         Build the 4×4 Hamiltonian matrix h for H = J σ₁ˣ σ₂ˣ.
         
@@ -74,18 +80,18 @@ class TwoQubitCorrelationSimulator:
         where J here is actually -1 in the docs example, but we parameterize it.
         """
         # Each block is 2×2 for L=2
-        h11 = np.array([[0.0, -self.J], [0.0, 0.0]], dtype=complex)
-        h12 = np.array([[0.0, -self.J], [0.0, 0.0]], dtype=complex)
-        h21 = np.array([[0.0, +self.J], [0.0, 0.0]], dtype=complex)
-        h22 = np.array([[0.0, +self.J], [0.0, 0.0]], dtype=complex)
+        h11 = self.backend.array([[0.0, -self.J], [0.0, 0.0]], dtype=complex)
+        h12 = self.backend.array([[0.0, -self.J], [0.0, 0.0]], dtype=complex)
+        h21 = self.backend.array([[0.0, +self.J], [0.0, 0.0]], dtype=complex)
+        h22 = self.backend.array([[0.0, +self.J], [0.0, 0.0]], dtype=complex)
         
         # Assemble block matrix
-        top = np.hstack([h11, h12])
-        bottom = np.hstack([h21, h22])
-        h = np.vstack([top, bottom])
+        top = self.backend.hstack([h11, h12])
+        bottom = self.backend.hstack([h21, h22])
+        h = self.backend.vstack([top, bottom])
         return h
     
-    def _compute_z_values(self, G: np.ndarray) -> Tuple[float, float]:
+    def _compute_z_values(self, G: Any) -> Tuple[float, float]:
         """
         Compute ⟨σ₁ᶻ⟩ and ⟨σ₂ᶻ⟩ from correlation matrix.
         
@@ -96,19 +102,20 @@ class TwoQubitCorrelationSimulator:
         - G[0,0] = ⟨c₁†c₁⟩, so z₁ = 2*Re(G[0,0]) - 1
         - G[1,1] = ⟨c₂†c₂⟩, so z₂ = 2*Re(G[1,1]) - 1
         """
-        z1 = 2.0 * np.real(G[0, 0]) - 1.0
-        z2 = 2.0 * np.real(G[1, 1]) - 1.0
+        diag_real = self.backend.asnumpy(self.backend.real(self.backend.diag(G)))
+        z1 = 2.0 * float(diag_real[0]) - 1.0
+        z2 = 2.0 * float(diag_real[1]) - 1.0
         return float(z1), float(z2)
     
-    def _hamiltonian_step(self, G: np.ndarray) -> np.ndarray:
+    def _hamiltonian_step(self, G: Any) -> Any:
         """
         Apply Hamiltonian evolution: dG = -2i dt [G, h]
         """
-        commutator = G @ self.h - self.h @ G
+        commutator = self.backend.matmul(G, self.h) - self.backend.matmul(self.h, G)
         dG = -2.0j * self.dt * commutator
         return G + dG
     
-    def _measurement_step(self, G: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _measurement_step(self, G: Any) -> Tuple[Any, np.ndarray]:
         """
         Apply measurement step with random outcomes.
         
@@ -123,25 +130,31 @@ class TwoQubitCorrelationSimulator:
         xi_array = np.array([xi1, xi2])
         
         # Build ξ̂ = diag(ξ₁, ξ₂, -ξ₁, -ξ₂)
-        xi_hat = np.diag([xi1, xi2, -xi1, -xi2]).astype(complex)
+        xi_hat = self.backend.array(self.backend.diag([xi1, xi2, -xi1, -xi2]), dtype=complex)
         
         # Measurement evolution (stochastic term)
-        stochastic = self.epsilon * (G @ xi_hat + xi_hat @ G - 2.0 * G @ xi_hat @ G)
+        stochastic = self.epsilon * (
+            self.backend.matmul(G, xi_hat)
+            + self.backend.matmul(xi_hat, G)
+            - 2.0 * self.backend.matmul(self.backend.matmul(G, xi_hat), G)
+        )
         
         # Damping term (deterministic)
-        G_diag = np.diag(np.diag(G))
+        G_diag = self.backend.diag(self.backend.diag(G))
         damping = -self.epsilon**2 * (G - G_diag)
         
         dG = stochastic + damping
         G_new = G + dG
         
         # Ensure Hermiticity (numerical stability)
-        G_new = 0.5 * (G_new + G_new.conj().T)
+        G_new = 0.5 * (G_new + self.backend.conj(self.backend.transpose(G_new)))
         
         # Clip diagonal elements to physical range [0, 1]
         # The diagonal of G represents occupation probabilities
-        for i in range(len(G_new)):
-            G_new[i, i] = np.clip(np.real(G_new[i, i]), 0.0, 1.0) + 0.0j
+        diag_real = self.backend.real(self.backend.diag(G_new))
+        diag_clipped = self.backend.asnumpy(self.backend.clip(diag_real, 0.0, 1.0))
+        for i, value in enumerate(diag_clipped):
+            G_new[i, i] = float(value) + 0.0j
         
         return G_new, xi_array
     
@@ -156,7 +169,7 @@ class TwoQubitCorrelationSimulator:
             z_trajectory: array of shape (N_steps+1, 2) with z₁, z₂ at each step
             xi_trajectory: array of shape (N_steps, 2) with ξ₁, ξ₂ at each step
         """
-        G = self.G_initial.copy()
+        G = self.backend.copy(self.G_initial)
         z_trajectory = np.zeros((self.N_steps + 1, 2))
         xi_trajectory = np.zeros((self.N_steps, 2), dtype=int)
         

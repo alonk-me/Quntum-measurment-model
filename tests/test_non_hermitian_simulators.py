@@ -43,6 +43,17 @@ class TestNonHermitianHatSimulator:
         assert sim.J == minimal_params['J']
         assert sim.gamma == minimal_params['gamma']
         assert sim.T_total == minimal_params['dt'] * minimal_params['N_steps']
+
+    def test_accepts_device_cpu(self, minimal_params):
+        """Test simulator supports explicit CPU device selection."""
+        params = minimal_params.copy()
+        params['device'] = 'cpu'
+        sim = NonHermitianHatSimulator(**params)
+        Q_total, n_traj, G_final = sim.simulate_trajectory(return_G_final=True)
+
+        assert np.isfinite(Q_total)
+        assert n_traj.shape == (params['N_steps'] + 1, params['L'])
+        assert G_final.shape == (2 * params['L'], 2 * params['L'])
     
     def test_backward_compatibility_mode(self, minimal_params):
         """Test that return_G_final=False works (backward compatibility)."""

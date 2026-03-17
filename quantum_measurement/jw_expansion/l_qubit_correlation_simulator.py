@@ -50,8 +50,10 @@ production notes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from typing import Any, Optional, Tuple
 import numpy as np
+
+from quantum_measurement.backends import Backend, get_backend
 
 
 @dataclass
@@ -88,14 +90,19 @@ class LQubitCorrelationSimulator:
     N_steps: int = 1000
     T: float = 1.0
     closed_boundary: bool = False
+    device: str = "cpu"
+    backend: Backend | None = field(default=None, repr=False)
     rng: Optional[np.random.Generator] = field(default=None, repr=False)
 
     # Derived quantities initialised after construction
     dt: float = field(init=False)
-    h: np.ndarray = field(init=False, repr=False)
-    G_initial: np.ndarray = field(init=False, repr=False)
+    h: Any = field(init=False, repr=False)
+    G_initial: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.backend is None:
+            self.backend = get_backend(self.device)
+
         # Validate input
         if self.L < 1:
             raise ValueError("L must be at least 1")
@@ -116,11 +123,11 @@ class LQubitCorrelationSimulator:
 
         # Construct initial correlation matrix: ones on the first L diagonal
         # entries (occupied modes) and zeros on the last L (empty modes).
-        self.G_initial = np.zeros((2 * self.L, 2 * self.L), dtype=complex)
+        self.G_initial = self.backend.zeros((2 * self.L, 2 * self.L), dtype=complex)
         for i in range(self.L):
             self.G_initial[i, i] = 1.0 + 0.0j
 
-    def _build_hamiltonian(self) -> np.ndarray:
+    def _build_hamiltonian(self) -> Any:
         r"""Construct the 2L×2L Bogoliubov–de Gennes Hamiltonian ``h``.
 
         The matrix ``h`` is built from four L×L blocks ``h11``, ``h12``,
@@ -144,10 +151,10 @@ class LQubitCorrelationSimulator:
         """
         L = self.L
         J = self.J
-        h11 = np.zeros((L, L), dtype=complex)
-        h12 = np.zeros((L, L), dtype=complex)
-        h21 = np.zeros((L, L), dtype=complex)
-        h22 = np.zeros((L, L), dtype=complex)
+        h11 = self.backend.zeros((L, L), dtype=complex)
+        h12 = self.backend.zeros((L, L), dtype=complex)
+        h21 = self.backend.zeros((L, L), dtype=complex)
+        h22 = self.backend.zeros((L, L), dtype=complex)
 
         # Fill off‑diagonal entries corresponding to nearest neighbours
         for i in range(L - 1):
@@ -166,12 +173,12 @@ class LQubitCorrelationSimulator:
             h21[i, j] = +J
 
         # Assemble full BdG matrix
-        top = np.hstack((h11, h12))
-        bottom = np.hstack((h21, h22))
-        h = np.vstack((top, bottom))
+        top = self.backend.hstack((h11, h12))
+        bottom = self.backend.hstack((h21, h22))
+        h = self.backend.vstack((top, bottom))
         return h
 
-    def _compute_z_values(self, G: np.ndarray) -> np.ndarray:
+    def _compute_z_values(self, G: Any) -> np.ndarray:
         r"""Compute the expectation values ⟨σ^z_i⟩ for each site.
 
         In the Jordan–Wigner mapping the magnetisation on site ``i`` is
@@ -183,10 +190,11 @@ class LQubitCorrelationSimulator:
         where ``i`` refers to the annihilation index ``0 ≤ i < L``.  The
         returned array has shape ``(L,)``.
         """
-        z = 2.0 * np.real(np.diag(G)[: self.L]) - 1.0
+        diag_real = self.backend.asnumpy(self.backend.real(self.backend.diag(G)))
+        z = 2.0 * diag_real[: self.L] - 1.0
         return z.astype(float)
 
-    def _hamiltonian_step(self, G: np.ndarray) -> np.ndarray:
+    def _hamiltonian_step(self, G: Any) -> Any:
         r"""Apply a single time step of unitary evolution under ``h``.
 
         The Hamiltonian contribution to the equation of motion is
@@ -200,11 +208,11 @@ class LQubitCorrelationSimulator:
         discretisation suffices for small ``dt`` and is consistent
         with the implementation used in the original two‑site code.
         """
-        commutator = G @ self.h - self.h @ G
+        commutator = self.backend.matmul(G, self.h) - self.backend.matmul(self.h, G)
         dG = -2.0j * self.dt * commutator
         return G + dG
 
-    def _measurement_step(self, G: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _measurement_step(self, G: Any) -> Tuple[Any, np.ndarray]:
         r"""Apply a measurement step with stochastic outcomes on each site.
 
         Measurement back‑action on the correlation matrix is modelled by
@@ -234,24 +242,28 @@ class LQubitCorrelationSimulator:
         # Construct xi_hat as a diagonal matrix with +xi on the particle
         # sector and -xi on the hole sector
         xi_hat_diag = np.concatenate((xi, -xi)).astype(complex)
-        xi_hat = np.diag(xi_hat_diag)
+        xi_hat = self.backend.array(self.backend.diag(xi_hat_diag), dtype=complex)
 
         # Stochastic term proportional to ε
-        stochastic = self.epsilon * (G @ xi_hat + xi_hat @ G - 2.0 * G @ xi_hat @ G)
+        stochastic = self.epsilon * (
+            self.backend.matmul(G, xi_hat)
+            + self.backend.matmul(xi_hat, G)
+            - 2.0 * self.backend.matmul(self.backend.matmul(G, xi_hat), G)
+        )
         # Deterministic damping term proportional to ε²
-        G_diag = np.diag(np.diag(G))
+        G_diag = self.backend.diag(self.backend.diag(G))
         damping = - (self.epsilon ** 2) * (G - G_diag)
 
         G_new = G + stochastic + damping
 
         # Symmetrise to counteract numerical drift and enforce Hermiticity
-        G_new = 0.5 * (G_new + G_new.conj().T)
+        G_new = 0.5 * (G_new + self.backend.conj(self.backend.transpose(G_new)))
 
         # Clip diagonal entries (occupation probabilities) into [0,1]
-        diag = np.diag(G_new).copy()
-        diag_clipped = np.clip(np.real(diag), 0.0, 1.0)
+        diag = self.backend.real(self.backend.diag(G_new))
+        diag_clipped = self.backend.asnumpy(self.backend.clip(diag, 0.0, 1.0))
         for i in range(2 * self.L):
-            G_new[i, i] = diag_clipped[i] + 0.0j
+            G_new[i, i] = float(diag_clipped[i]) + 0.0j
 
         return G_new, xi
 
@@ -283,7 +295,7 @@ class LQubitCorrelationSimulator:
             Array of shape ``(N_steps, L)`` containing the ±1 measurement
             outcomes at each time step.
         """
-        G = self.G_initial.copy()
+        G = self.backend.copy(self.G_initial)
         z_traj = np.zeros((self.N_steps + 1, self.L), dtype=float)
         xi_traj = np.zeros((self.N_steps, self.L), dtype=int)
 
@@ -326,7 +338,7 @@ class LQubitCorrelationSimulator:
         float
             Mean of z^2 over all sites and time steps.
         """
-        G = self.G_initial.copy()
+        G = self.backend.copy(self.G_initial)
 
         z = self._compute_z_values(G)
         sum_z2 = float(np.sum(z ** 2))

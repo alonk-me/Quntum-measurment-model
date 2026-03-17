@@ -36,6 +36,13 @@ class TestSSEInitialization:
         sim = SSEWavefunctionSimulator(rng=None)
         assert sim.rng is not None
 
+    def test_accepts_device_cpu(self):
+        sim = SSEWavefunctionSimulator(device="cpu", N_steps=5, rng=np.random.default_rng(1))
+        Q, z_traj, meas = sim.simulate_trajectory()
+        assert np.isfinite(Q)
+        assert z_traj.shape == (6,)
+        assert meas.shape == (5,)
+
 
 class TestPrepareInitialState:
     """Test all preset initial states return normalized wavefunctions."""

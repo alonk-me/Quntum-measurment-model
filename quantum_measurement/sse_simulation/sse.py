@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from typing import Any, Tuple
+
+from quantum_measurement.backends import Backend, get_backend
 
 
 @dataclass
@@ -58,52 +60,59 @@ class SSEWavefunctionSimulator:
     initial_state: str = 'bloch_equator'
     theta: float = np.pi/2  # For custom state
     phi: float = 0.0        # For custom state  
+    device: str = "cpu"
+    backend: Backend | None = field(default=None, repr=False)
     rng: np.random.Generator | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.backend is None:
+            self.backend = get_backend(self.device)
+
         if self.rng is None:
             self.rng = np.random.default_rng()
 
         # Pre-compute Pauli matrices
-        self.sigma_z = np.array([[1.0, 0.0], [0.0, -1.0]], dtype=complex)
-        self.sigma_x = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
-        self.sigma_y = np.array([[0.0, -1j], [1j, 0.0]], dtype=complex)
-        self.identity = np.eye(2, dtype=complex)
+        self.sigma_z = self.backend.array([[1.0, 0.0], [0.0, -1.0]], dtype=complex)
+        self.sigma_x = self.backend.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
+        self.sigma_y = self.backend.array([[0.0, -1j], [1j, 0.0]], dtype=complex)
+        self.identity = self.backend.array([[1.0, 0.0], [0.0, 1.0]], dtype=complex)
 
         # Set initial state
         self.psi_initial = self._prepare_initial_state()
 
-    def _prepare_initial_state(self) -> np.ndarray:
+    def _prepare_initial_state(self) -> Any:
         """Prepare the initial quantum state based on configuration."""
         if self.initial_state == 'bloch_equator':
             # |+x⟩ = (|0⟩ + |1⟩)/√2
-            return np.array([1.0, 1.0], dtype=complex) / np.sqrt(2)
+            return self.backend.array([1.0, 1.0], dtype=complex) / np.sqrt(2)
         elif self.initial_state == 'up':
             # |0⟩
-            return np.array([1.0, 0.0], dtype=complex)
+            return self.backend.array([1.0, 0.0], dtype=complex)
         elif self.initial_state == 'down':
             # |1⟩  
-            return np.array([0.0, 1.0], dtype=complex)
+            return self.backend.array([0.0, 1.0], dtype=complex)
         elif self.initial_state == 'plus_y':
             # |+y⟩ = (|0⟩ + i|1⟩)/√2
-            return np.array([1.0, 1j], dtype=complex) / np.sqrt(2)
+            return self.backend.array([1.0, 1j], dtype=complex) / np.sqrt(2)
         elif self.initial_state == 'minus_y':
             # |-y⟩ = (|0⟩ - i|1⟩)/√2
-            return np.array([1.0, -1j], dtype=complex) / np.sqrt(2)
+            return self.backend.array([1.0, -1j], dtype=complex) / np.sqrt(2)
         elif self.initial_state == 'custom':
             # General Bloch sphere state: cos(θ/2)|0⟩ + e^(iφ)sin(θ/2)|1⟩
-            return np.array([
+            return self.backend.array([
                 np.cos(self.theta/2),
                 np.exp(1j * self.phi) * np.sin(self.theta/2)
             ], dtype=complex)
         else:
             raise ValueError(f"Unknown initial state: {self.initial_state}")
 
-    def _expectation_value_z(self, psi: np.ndarray) -> float:
+    def _expectation_value_z(self, psi: Any) -> float:
         """Calculate ⟨ψ|σ_z|ψ⟩."""
-        return np.real(np.conj(psi) @ self.sigma_z @ psi)
+        bra = self.backend.conj(psi)
+        value = self.backend.matmul(self.backend.matmul(bra, self.sigma_z), psi)
+        return float(self.backend.asnumpy(self.backend.real(value)))
 
-    def _apply_hamiltonian_evolution(self, psi: np.ndarray, dt: float) -> np.ndarray:
+    def _apply_hamiltonian_evolution(self, psi: Any, dt: float) -> Any:
         """Apply Hamiltonian evolution for time step dt."""
         if abs(self.J) < 1e-15:  # No Hamiltonian evolution
             return psi
@@ -115,9 +124,9 @@ class SSEWavefunctionSimulator:
         sin_angle = np.sin(angle)
 
         U = cos_angle * self.identity - 1j * sin_angle * self.sigma_y
-        return U @ psi
+        return self.backend.matmul(U, psi)
 
-    def _measurement_update(self, psi: np.ndarray) -> Tuple[np.ndarray, int, float]:
+    def _measurement_update(self, psi: Any) -> Tuple[Any, int, float]:
         """Apply single discrete measurement step.
         
         Returns:
@@ -133,22 +142,22 @@ class SSEWavefunctionSimulator:
         sigma_z_minus_z = self.sigma_z - z_before * self.identity
 
         # First order term: ξε(σ_z - z)/2
-        first_order = xi * self.epsilon * 0.5 * sigma_z_minus_z @ psi
+        first_order = xi * self.epsilon * 0.5 * self.backend.matmul(sigma_z_minus_z, psi)
 
         # Second order term: -(ε²/2)(σ_z - z)²/4  
-        second_order_op = -0.5 * (self.epsilon**2) * 0.25 * (sigma_z_minus_z @ sigma_z_minus_z)
-        second_order = second_order_op @ psi
+        second_order_op = -0.5 * (self.epsilon**2) * 0.25 * self.backend.matmul(sigma_z_minus_z, sigma_z_minus_z)
+        second_order = self.backend.matmul(second_order_op, psi)
 
         # Update wavefunction
         psi_new = psi + first_order + second_order
 
         # Normalize to maintain unit norm
-        norm = np.linalg.norm(psi_new)
+        norm = np.linalg.norm(self.backend.asnumpy(psi_new))
         if norm > 1e-15:
             psi_new = psi_new / norm
         else:
             # Fallback to prevent numerical issues
-            psi_new = psi / np.linalg.norm(psi)
+            psi_new = psi / np.linalg.norm(self.backend.asnumpy(psi))
 
         return psi_new, xi, z_before
 
@@ -162,7 +171,7 @@ class SSEWavefunctionSimulator:
             z_trajectory: Array of z expectation values at each step
             measurement_results: Array of measurement outcomes ξ_i = ±1
         """
-        psi = self.psi_initial.copy()
+        psi = self.backend.copy(self.psi_initial)
         z_trajectory = np.zeros(self.N_steps + 1)
         measurement_results = np.zeros(self.N_steps, dtype=int)
 
