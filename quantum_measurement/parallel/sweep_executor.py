@@ -22,16 +22,16 @@ class SweepTask:
 def _detect_gpu_count() -> int:
     if not importlib.util.find_spec("cupy"):
         return 0
-
-
-def _is_gpu_oom_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return "out of memory" in msg or "cuda_error_out_of_memory" in msg or "cudamemoryerror" in msg
     try:
         cp = importlib.import_module("cupy")
         return int(cp.cuda.runtime.getDeviceCount())
     except Exception:
         return 0
+
+
+def _is_gpu_oom_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda_error_out_of_memory" in msg or "cudamemoryerror" in msg
 
 
 def _execute_task(

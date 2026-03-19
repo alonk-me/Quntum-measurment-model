@@ -185,10 +185,14 @@ omitted from this upgrade and is out of scope for this Phase 2 pass.
 ## Verification
 
 After Phase 1–3 (GPU acceleration):
-- Run `tests/test_gpu_backend.py`: all tests pass
-- Execute `scripts/benchmark_gpu_speedup.py`: confirm >20× speedup for large L
-- Run small parameter sweep: `python scripts/run_ninf_scan.py --device gpu --test-mode`
-- Compare results with baseline CPU runs: verify n_∞(γ) curves match within 1%
+- Readiness gate: verify `ParameterSweepExecutor` GPU worker/device detection and OOM fallback paths are healthy before long runs
+- Run `pytest tests/test_gpu_backend.py tests/test_sweep_executor.py`: all tests pass
+- Execute `python scripts/benchmark_gpu_speedup.py --simulator l_qubit --L 32 --n-steps 200 --n-trajectories 128 --batch-sizes 1 2 4 8 16 32 --repeats 3`
+- Run small parameter sweep using existing CLI flags:
+    `python scripts/run_ninf_scan.py --device gpu --parallel-backend sequential --l-values 9 17 --gamma-values 0.4 1.0 4.0 --skip-plots`
+- Run CPU baseline with the same grid:
+    `python scripts/run_ninf_scan.py --device cpu --parallel-backend sequential --l-values 9 17 --gamma-values 0.4 1.0 4.0 --skip-plots`
+- Compare GPU vs CPU outputs on shared `(L,γ)` points; require |Δn_∞|/max(|n_∞|,1e-12) ≤ 1%
 
 After Phase 6 (ML data pipeline):
 - Generate test dataset: 1000 trajectories with balanced class labels

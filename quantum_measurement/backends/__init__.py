@@ -5,7 +5,6 @@ import warnings
 
 from .base import Backend
 from .numpy_backend import NumPyBackend
-from .cupy_backend import CuPyBackend
 
 
 def is_cupy_available() -> bool:
@@ -24,6 +23,8 @@ def get_backend(device: str = "cpu", seed: int | None = None) -> Backend:
         return NumPyBackend(seed=seed)
     if device_lower in {"gpu", "cuda", "cupy"}:
         if is_cupy_available():
+            from .cupy_backend import CuPyBackend
+
             return CuPyBackend(seed=seed)
         warnings.warn("GPU backend requested but CuPy/CUDA unavailable; falling back to NumPy backend.", RuntimeWarning)
         return NumPyBackend(seed=seed)
@@ -32,7 +33,6 @@ def get_backend(device: str = "cpu", seed: int | None = None) -> Backend:
 
 __all__ = [
     "Backend",
-    "CuPyBackend",
     "NumPyBackend",
     "get_backend",
     "is_cupy_available",

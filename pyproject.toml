@@ -20,6 +20,8 @@ dependencies = [
 [project.optional-dependencies]
 progress = ["tqdm"]
 dev = ["pytest"]
+gpu = ["cupy-cuda12x"]
+
 # Flat layout: packages live directly under the repo root
 [tool.setuptools.packages.find]
 include = ["quantum_measurement*"]

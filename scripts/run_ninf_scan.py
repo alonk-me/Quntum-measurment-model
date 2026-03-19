@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 Production Script: n_∞(γ) Parameter Sweep with Adaptive Convergence
 

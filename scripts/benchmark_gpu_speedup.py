@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from quantum_measurement.backends import is_cupy_available
 from quantum_measurement.jw_expansion.l_qubit_correlation_simulator import LQubitCorrelationSimulator
