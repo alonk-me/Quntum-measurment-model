@@ -208,6 +208,62 @@ After Phase 1–3 (GPU acceleration):
 - Best benchmark speedup: **1.14x** at batch size **32**
 
 
+## Post-Phase-3 Long-Run Benchmark Plan
+
+Goal: map effective GPU speedup as a surface over `(L, batch_size)` under longer runs that amortize startup overhead, while keeping execution resilient to disconnects.
+
+1. Benchmark matrix (production-aligned, longer horizon)
+    - `L_values = [64, 128]` for baseline long run; add `256` only if VRAM headroom remains stable
+    - `batch_sizes = [16, 32, 64, 96, 128, 192]` with dynamic pruning from `estimate_trajectory_batch_size(L)`
+    - `n_trajectories = [512, 1024, 2048]`
+    - **`n_steps` scale starts at `10000`** and then increases to `[30000, 100000]`
+    - `repeats = 3` for campaign pass, optional `repeats = 5` for final reporting
+
+2. Production-scale region coverage
+    - Include representative weak/critical/strong regions using `gamma` values drawn from production scans:
+      - weak: `g ~ 0.1` (`gamma ~ 0.4`)
+      - critical: `g ~ 1.0` (`gamma ~ 4.0`)
+      - strong: `g >= 2` (`gamma >= 8.0`)
+    - Keep this region subset for long-run profiling and reserve full dense grids for final validation scans.
+
+3. Disconnect-safe execution (must survive terminal/network drops)
+    - Preferred: `tmux` session with detached run:
+      - `tmux new -s gpu_bench_long`
+         - `sudo docker compose -f docker-compose.gpu.yml run --rm qm-gpu-benchmark-long`
+      - Detach with `Ctrl+b d`; reattach with `tmux attach -t gpu_bench_long`
+    - Fallback: `nohup` + pid/log files:
+         - `./scripts/start_long_gpu_benchmark.sh --background`
+         - Monitor: `tail -f logs/long_gpu_benchmark_<timestamp>.log`
+
+4. Live monitoring controls (start, log-off/log-on, view)
+     - Start in background:
+         - `./scripts/monitor_long_gpu_benchmark.sh start`
+     - Status of run and monitor tail process:
+         - `./scripts/monitor_long_gpu_benchmark.sh status`
+     - Show latest log excerpt:
+         - `./scripts/monitor_long_gpu_benchmark.sh logs`
+     - Turn continuous log monitor on/off:
+         - `./scripts/monitor_long_gpu_benchmark.sh log-on`
+         - `./scripts/monitor_long_gpu_benchmark.sh log-off`
+     - View progress snapshot from CSV:
+         - `./scripts/monitor_long_gpu_benchmark.sh view`
+     - Stop running campaign:
+         - `./scripts/monitor_long_gpu_benchmark.sh stop`
+
+5. Outputs and analysis requirements
+    - Save benchmark artifacts to `results/test_scan/post_phase3_benchmark_<timestamp>.csv`
+    - Build speedup surfaces per trajectory level:
+      - `speedup(L, batch_size) = throughput_gpu / throughput_cpu`
+    - Report crossover points where speedup crosses 1.0 for each `L`
+    - Publish a short markdown report card from notebook output after each campaign run.
+
+6. Acceptance criteria for long-run campaign
+    - No OOM crashes for retained `(L, batch_size)` tuples
+    - Completed CPU+GPU rows for every retained tuple
+    - At least one `batch_size` with speedup `> 1.0` for each tested `L`
+    - Reproducible detached execution confirmed (run continues after disconnect)
+
+
 After Phase 6 (ML data pipeline):
 - Generate test dataset: 1000 trajectories with balanced class labels
 - Verify HDF5 file structure and feature dimensions

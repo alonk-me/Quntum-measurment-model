@@ -22,19 +22,27 @@ from quantum_measurement.jw_expansion.two_qubit_correlation_simulator import Two
 from quantum_measurement.sse_simulation.sse import SSEWavefunctionSimulator
 
 
-def build_simulator(name: str, device: str, n_steps: int, L: int, seed: int):
+def build_simulator(
+    name: str,
+    device: str,
+    n_steps: int,
+    L: int,
+    seed: int,
+    epsilon: float = 0.1,
+    T: float = 1.0,
+):
     if name == "two_qubit":
         return TwoQubitCorrelationSimulator(
             J=1.0,
-            epsilon=0.1,
+            epsilon=epsilon,
             N_steps=n_steps,
-            T=1.0,
+            T=T,
             device=device,
             rng=np.random.default_rng(seed),
         )
     if name == "sse":
         return SSEWavefunctionSimulator(
-            epsilon=0.1,
+            epsilon=epsilon,
             N_steps=n_steps,
             J=0.0,
             device=device,
@@ -44,9 +52,9 @@ def build_simulator(name: str, device: str, n_steps: int, L: int, seed: int):
         return LQubitCorrelationSimulator(
             L=L,
             J=1.0,
-            epsilon=0.1,
+            epsilon=epsilon,
             N_steps=n_steps,
-            T=1.0,
+            T=T,
             device=device,
             rng=np.random.default_rng(seed),
         )
