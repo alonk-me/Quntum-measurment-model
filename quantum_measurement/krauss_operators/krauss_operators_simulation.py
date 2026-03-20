@@ -108,7 +108,10 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from tqdm import tqdm
 
-from datatypes import InitialState, TrajectoryResult
+try:
+    from datatypes import InitialState, TrajectoryResult  # type: ignore[import]
+except ImportError:
+    from quantum_measurement.krauss_operators.datatypes import InitialState, TrajectoryResult  # type: ignore[no-redef]
 
 
 def run_trajectory(N: int, epsilon: float, omega_dt: float = 0.0, initial_state: Optional[InitialState] = None, rng: Optional[np.random.Generator] = None) -> TrajectoryResult:
