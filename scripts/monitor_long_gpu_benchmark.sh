@@ -8,6 +8,18 @@ LOG_DIR="logs"
 OUT_DIR="results/test_scan"
 STATE_PATH="$LOG_DIR/long_gpu_benchmark.state"
 TAIL_PID_PATH="$LOG_DIR/long_gpu_benchmark_tail.pid"
+PLOT_PID_PATH="$LOG_DIR/long_gpu_benchmark_plot.pid"
+PLOT_OUT_PATH="$LOG_DIR/long_gpu_benchmark_plot.out"
+
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+  PYTHON_BIN="$PYTHON_BIN"
+elif [[ -x ".venv/bin/python" ]]; then
+  PYTHON_BIN=".venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+else
+  PYTHON_BIN="python"
+fi
 
 usage() {
   cat <<EOF
@@ -20,6 +32,8 @@ Commands:
   log-on                         Start background tail -f monitor
   log-off                        Stop background tail monitor
   view                           Show CSV progress snapshot
+  plot [--interval SEC]          Start live PNG progress plot refresher
+  plot-stop                      Stop live PNG progress plot refresher
   stop                           Stop running campaign process
 
 Examples:
@@ -29,6 +43,8 @@ Examples:
   ./scripts/monitor_long_gpu_benchmark.sh log-on
   ./scripts/monitor_long_gpu_benchmark.sh log-off
   ./scripts/monitor_long_gpu_benchmark.sh view
+  ./scripts/monitor_long_gpu_benchmark.sh plot --interval 30
+  ./scripts/monitor_long_gpu_benchmark.sh plot-stop
   ./scripts/monitor_long_gpu_benchmark.sh stop
 EOF
 }
@@ -76,6 +92,16 @@ cmd_status() {
     echo "tail:  ACTIVE (pid=$tail_pid)"
   else
     echo "tail:  INACTIVE"
+  fi
+
+  local plot_pid=""
+  if [[ -f "$PLOT_PID_PATH" ]]; then
+    plot_pid="$(cat "$PLOT_PID_PATH" 2>/dev/null || true)"
+  fi
+  if is_pid_alive "$plot_pid"; then
+    echo "plot:  ACTIVE (pid=$plot_pid)"
+  else
+    echo "plot:  INACTIVE"
   fi
 }
 
@@ -130,11 +156,12 @@ cmd_view() {
     exit 1
   fi
 
-  /home/alon/Documents/VS_code/Quntum-measurment-model/.venv/bin/python - <<'PY'
+  STATE_PATH_ENV="$STATE_PATH" "$PYTHON_BIN" - <<'PY'
 import os
+import math
 import pandas as pd
 
-state_path = os.path.join('logs', 'long_gpu_benchmark.state')
+state_path = os.environ['STATE_PATH_ENV']
 state = {}
 with open(state_path, 'r', encoding='utf-8') as f:
     for line in f:
@@ -144,11 +171,31 @@ with open(state_path, 'r', encoding='utf-8') as f:
 
 csv_path = state['CSV_PATH']
 df = pd.read_csv(csv_path)
+expected_rows_raw = state.get('EXPECTED_ROWS', '').strip()
+expected_rows = int(expected_rows_raw) if expected_rows_raw.isdigit() else None
 
-print(f"rows: {len(df)}")
-print(f"last_timestamp: {df['timestamp'].iloc[-1] if len(df) else 'n/a'}")
+rows = len(df)
+print(f"rows: {rows}")
+print(f"last_timestamp: {df['timestamp'].iloc[-1] if rows else 'n/a'}")
 
-if len(df):
+if rows:
+    runtime = float(df['campaign_runtime_sec'].iloc[-1]) if 'campaign_runtime_sec' in df.columns else float('nan')
+    avg_row_sec = runtime / rows if runtime and runtime > 0 else float('nan')
+    rows_per_hour = 3600.0 / avg_row_sec if avg_row_sec and avg_row_sec > 0 else float('nan')
+    print(f"elapsed_sec: {runtime:.2f}" if math.isfinite(runtime) else "elapsed_sec: n/a")
+    print(f"avg_row_sec: {avg_row_sec:.2f}" if math.isfinite(avg_row_sec) else "avg_row_sec: n/a")
+    print(f"rows_per_hour: {rows_per_hour:.2f}" if math.isfinite(rows_per_hour) else "rows_per_hour: n/a")
+
+    if expected_rows is not None and expected_rows > 0 and math.isfinite(avg_row_sec):
+        remaining = max(expected_rows - rows, 0)
+        eta_sec = remaining * avg_row_sec
+        print(f"expected_rows: {expected_rows}")
+        print(f"remaining_rows: {remaining}")
+        print(f"eta_hours: {eta_sec / 3600.0:.2f}")
+    else:
+        print("expected_rows: n/a")
+        print("eta_hours: n/a")
+
     grouped = df.groupby(['device', 'L'])['throughput_traj_per_sec'].agg(['count', 'mean', 'max']).reset_index()
     print("\nprogress by device/L:")
     print(grouped.to_string(index=False))
@@ -156,7 +203,59 @@ if len(df):
     if {'device', 'L', 'batch_size', 'n_steps', 'n_trajectories'}.issubset(df.columns):
         u = df[['device', 'L', 'batch_size', 'n_steps', 'n_trajectories']].drop_duplicates()
         print(f"\nunique tuples completed: {len(u)}")
+
+    last = df.iloc[-1]
+    print("\nlatest tuple:")
+    print(
+        "device={device} L={L} n_steps={n_steps} n_traj={n_trajectories} "
+        "batch={batch_size} gamma={gamma} tps={tps:.3f}".format(
+            device=last.get('device', 'n/a'),
+            L=last.get('L', 'n/a'),
+            n_steps=last.get('n_steps', 'n/a'),
+            n_trajectories=last.get('n_trajectories', 'n/a'),
+            batch_size=last.get('batch_size', 'n/a'),
+            gamma=last.get('gamma', 'n/a'),
+            tps=float(last.get('throughput_traj_per_sec', float('nan'))),
+        )
+    )
 PY
+}
+
+cmd_plot() {
+  load_state
+
+  if [[ -f "$PLOT_PID_PATH" ]] && is_pid_alive "$(cat "$PLOT_PID_PATH")"; then
+    echo "Plot monitor already active (pid=$(cat "$PLOT_PID_PATH"))."
+    exit 0
+  fi
+
+  local interval="30"
+  if [[ "${1:-}" == "--interval" ]]; then
+    interval="${2:-30}"
+  fi
+
+  nohup "$PYTHON_BIN" scripts/plot_gpu_benchmark_progress.py --state "$STATE_PATH" --interval "$interval" >"$PLOT_OUT_PATH" 2>&1 &
+  echo $! >"$PLOT_PID_PATH"
+  echo "Plot monitor started (pid=$(cat "$PLOT_PID_PATH"))."
+  echo "Output: $PLOT_OUT_PATH"
+  echo "Image: $OUT_DIR/gpu_benchmark_live_progress.png"
+}
+
+cmd_plot_stop() {
+  if [[ ! -f "$PLOT_PID_PATH" ]]; then
+    echo "No plot monitor pid file found."
+    exit 0
+  fi
+
+  local pid
+  pid="$(cat "$PLOT_PID_PATH" 2>/dev/null || true)"
+  if is_pid_alive "$pid"; then
+    kill "$pid"
+    echo "Plot monitor stopped (pid=$pid)."
+  else
+    echo "Plot monitor pid not active."
+  fi
+  rm -f "$PLOT_PID_PATH"
 }
 
 cmd_stop() {
@@ -197,6 +296,13 @@ main() {
       ;;
     view)
       cmd_view
+      ;;
+    plot)
+      shift
+      cmd_plot "$@"
+      ;;
+    plot-stop)
+      cmd_plot_stop
       ;;
     stop)
       cmd_stop

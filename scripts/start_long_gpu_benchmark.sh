@@ -24,6 +24,12 @@ LOG_PATH="${LOG_PATH:-$LOG_DIR/long_gpu_benchmark_${STAMP}.log}"
 PID_PATH="${PID_PATH:-$LOG_DIR/long_gpu_benchmark.pid}"
 STATE_PATH="${STATE_PATH:-$LOG_DIR/long_gpu_benchmark.state}"
 
+compute_expected_rows() {
+  if ! "$PYTHON_BIN" scripts/run_long_gpu_benchmark_campaign.py --print-expected-rows "$@" 2>/dev/null; then
+    echo ""
+  fi
+}
+
 ln -sfn "$(basename "$CSV_PATH")" "$OUT_DIR/long_gpu_benchmark.latest.csv"
 ln -sfn "$(basename "$LOG_PATH")" "$LOG_DIR/long_gpu_benchmark.latest.log"
 
@@ -41,10 +47,23 @@ CMD=(
 
 if [[ "${1:-}" == "--background" ]]; then
   shift
+  EXPECTED_ROWS="$(compute_expected_rows "$@")"
   CMD+=("$@")
+
+  cat >"$STATE_PATH" <<EOF
+CSV_PATH=$CSV_PATH
+LOG_PATH=$LOG_PATH
+PID_PATH=$PID_PATH
+STAMP=$STAMP
+EXPECTED_ROWS=${EXPECTED_ROWS}
+EOF
+
   echo "Starting long GPU benchmark campaign in background"
   echo "  csv: $CSV_PATH"
   echo "  log: $LOG_PATH"
+  if [[ -n "${EXPECTED_ROWS}" ]]; then
+    echo "  expected_rows: $EXPECTED_ROWS"
+  fi
   nohup "${CMD[@]}" >"$LOG_PATH" 2>&1 &
   echo $! >"$PID_PATH"
   echo "  pid: $(cat "$PID_PATH")"
@@ -56,7 +75,20 @@ if [[ "${1:-}" == "--background" ]]; then
 fi
 
 CMD+=("$@")
+EXPECTED_ROWS="$(compute_expected_rows "$@")"
+
+cat >"$STATE_PATH" <<EOF
+CSV_PATH=$CSV_PATH
+LOG_PATH=$LOG_PATH
+PID_PATH=$PID_PATH
+STAMP=$STAMP
+EXPECTED_ROWS=${EXPECTED_ROWS}
+EOF
+
 echo "Starting long GPU benchmark campaign in foreground"
 echo "  csv: $CSV_PATH"
 echo "  log: $LOG_PATH"
+if [[ -n "${EXPECTED_ROWS}" ]]; then
+  echo "  expected_rows: $EXPECTED_ROWS"
+fi
 "${CMD[@]}" | tee "$LOG_PATH"

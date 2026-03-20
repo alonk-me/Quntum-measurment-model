@@ -13,3 +13,5 @@ rust/*
 *.log
 *.pid
 .github/
+*.out
+*.state

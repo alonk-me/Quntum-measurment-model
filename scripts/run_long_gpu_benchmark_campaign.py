@@ -63,19 +63,51 @@ def append_row(csv_path: Path, row: dict[str, object], header: list[str]) -> Non
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Long-run GPU benchmark campaign with resume support")
     parser.add_argument("--simulator", choices=["l_qubit", "two_qubit", "sse"], default="l_qubit")
-    parser.add_argument("--L-values", type=int, nargs="+", default=[64, 128])
-    parser.add_argument("--n-steps-values", type=int, nargs="+", default=[10000, 30000, 100000])
-    parser.add_argument("--n-trajectories-values", type=int, nargs="+", default=[512, 1024, 2048])
-    parser.add_argument("--batch-sizes", type=int, nargs="+", default=[16, 32, 64, 96, 128, 192])
-    parser.add_argument("--gammas", type=float, nargs="+", default=[0.4, 4.0, 8.0])
+    parser.add_argument("--L-values", type=int, nargs="+", default=[64])
+    parser.add_argument("--n-steps-values", type=int, nargs="+", default=[10000])
+    parser.add_argument("--n-trajectories-values", type=int, nargs="+", default=[512, 1024])
+    parser.add_argument("--batch-sizes", type=int, nargs="+", default=[16, 32, 64])
+    parser.add_argument("--gammas", type=float, nargs="+", default=[0.4, 4.0])
+    parser.add_argument(
+        "--device-scope",
+        choices=["gpu", "cpu", "both"],
+        default="gpu",
+        help="Device coverage for the campaign. 'gpu' is the overnight default.",
+    )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--T", type=float, default=1.0, help="Simulator total-time used to derive epsilon from gamma")
     parser.add_argument("--usage-fraction", type=float, default=0.60)
     parser.add_argument("--max-vram-gb", type=float, default=None)
     parser.add_argument("--csv", type=Path, default=None)
+    parser.add_argument("--print-expected-rows", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     return parser.parse_args()
+
+
+def resolve_devices(device_scope: str) -> list[str]:
+    cupy_ok = is_cupy_available()
+    if device_scope == "gpu":
+        if not cupy_ok:
+            raise RuntimeError("GPU scope requested but CuPy is not available in this environment")
+        return ["gpu"]
+    if device_scope == "cpu":
+        return ["cpu"]
+    if cupy_ok:
+        return ["cpu", "gpu"]
+    print("WARNING: device_scope=both requested but CuPy unavailable; using CPU only")
+    return ["cpu"]
+
+
+def expected_rows(args: argparse.Namespace, devices: list[str]) -> int:
+    return (
+        len(args.L_values)
+        * len(args.n_steps_values)
+        * len(args.n_trajectories_values)
+        * len(args.gammas)
+        * len(devices)
+        * len(args.batch_sizes)
+    )
 
 
 def main() -> None:
@@ -83,10 +115,11 @@ def main() -> None:
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = args.csv or (Path("results/test_scan") / f"long_gpu_benchmark_{stamp}.csv")
+    devices = resolve_devices(args.device_scope)
 
-    devices = ["cpu"]
-    if is_cupy_available():
-        devices.append("gpu")
+    if args.print_expected_rows:
+        print(expected_rows(args, devices))
+        return
 
     header = [
         "timestamp",
@@ -122,7 +155,9 @@ def main() -> None:
     )
 
     print(f"Running long benchmark campaign -> {csv_path}")
+    print(f"Device scope: {args.device_scope} ({','.join(devices)})")
     print(f"Total high-level tuples (without batch axis): {len(combos)}")
+    print(f"Planned row count (before VRAM pruning/resume skips): {expected_rows(args, devices)}")
     print(f"Resume enabled: {not args.no_resume}, completed rows loaded: {len(completed)}")
 
     t0_campaign = time.perf_counter()

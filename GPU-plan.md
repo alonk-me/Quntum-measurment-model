@@ -208,60 +208,61 @@ After Phase 1–3 (GPU acceleration):
 - Best benchmark speedup: **1.14x** at batch size **32**
 
 
-## Post-Phase-3 Long-Run Benchmark Plan
+## Post-Phase-3 Overnight Benchmark + Visual Monitoring Plan
 
-Goal: map effective GPU speedup as a surface over `(L, batch_size)` under longer runs that amortize startup overhead, while keeping execution resilient to disconnects.
+Goal: complete a predictable one-night benchmark run (8-12h target) while making progress visible via terminal and live plot outputs.
 
-1. Benchmark matrix (production-aligned, longer horizon)
-    - `L_values = [64, 128]` for baseline long run; add `256` only if VRAM headroom remains stable
-    - `batch_sizes = [16, 32, 64, 96, 128, 192]` with dynamic pruning from `estimate_trajectory_batch_size(L)`
-    - `n_trajectories = [512, 1024, 2048]`
-    - **`n_steps` scale starts at `10000`** and then increases to `[30000, 100000]`
-    - `repeats = 3` for campaign pass, optional `repeats = 5` for final reporting
+1. Overnight default profile (GPU-first, one night)
+        - `device_scope = gpu` (default)
+        - `L_values = [64]`
+        - `n_trajectories = [512, 1024]`
+        - `batch_sizes = [16, 32, 64]`
+        - `gammas = [0.4, 4.0]` (weak + critical)
+        - **`n_steps` starts at `10000`** (fixed overnight baseline)
+        - `repeats = 3`
+        - Expected rows before pruning/skips: `12`
 
-2. Production-scale region coverage
-    - Include representative weak/critical/strong regions using `gamma` values drawn from production scans:
-      - weak: `g ~ 0.1` (`gamma ~ 0.4`)
-      - critical: `g ~ 1.0` (`gamma ~ 4.0`)
-      - strong: `g >= 2` (`gamma >= 8.0`)
-    - Keep this region subset for long-run profiling and reserve full dense grids for final validation scans.
+2. ETA guardrails
+        - After first 2-3 completed rows, estimate runtime from observed `campaign_runtime_sec/rows`
+        - If projected finish is above 12 hours, apply fallback before reducing physics coverage:
+            - fallback `n_trajectories = [256, 512]`
+        - Keep VRAM guard active (`estimate_trajectory_batch_size`) and skip oversized batch rows rather than crashing.
 
-3. Disconnect-safe execution (must survive terminal/network drops)
-    - Preferred: `tmux` session with detached run:
-      - `tmux new -s gpu_bench_long`
-         - `sudo docker compose -f docker-compose.gpu.yml run --rm qm-gpu-benchmark-long`
-      - Detach with `Ctrl+b d`; reattach with `tmux attach -t gpu_bench_long`
-    - Fallback: `nohup` + pid/log files:
-         - `./scripts/start_long_gpu_benchmark.sh --background`
-         - Monitor: `tail -f logs/long_gpu_benchmark_<timestamp>.log`
+3. Disconnect-safe execution
+        - Start in background:
+            - `./scripts/monitor_long_gpu_benchmark.sh start`
+        - Check process states:
+            - `./scripts/monitor_long_gpu_benchmark.sh status`
+        - Stop campaign cleanly:
+            - `./scripts/monitor_long_gpu_benchmark.sh stop`
 
-4. Live monitoring controls (start, log-off/log-on, view)
-     - Start in background:
-         - `./scripts/monitor_long_gpu_benchmark.sh start`
-     - Status of run and monitor tail process:
-         - `./scripts/monitor_long_gpu_benchmark.sh status`
-     - Show latest log excerpt:
-         - `./scripts/monitor_long_gpu_benchmark.sh logs`
-     - Turn continuous log monitor on/off:
-         - `./scripts/monitor_long_gpu_benchmark.sh log-on`
-         - `./scripts/monitor_long_gpu_benchmark.sh log-off`
-     - View progress snapshot from CSV:
-         - `./scripts/monitor_long_gpu_benchmark.sh view`
-     - Stop running campaign:
-         - `./scripts/monitor_long_gpu_benchmark.sh stop`
+4. Visual monitoring controls (hybrid mode)
+        - Terminal progress card (rows, rows/hour, ETA, latest tuple):
+            - `./scripts/monitor_long_gpu_benchmark.sh view`
+        - Start live PNG refresher (default 30s):
+            - `./scripts/monitor_long_gpu_benchmark.sh plot --interval 30`
+        - Stop live PNG refresher:
+            - `./scripts/monitor_long_gpu_benchmark.sh plot-stop`
+        - PNG output path:
+            - `results/test_scan/gpu_benchmark_live_progress.png`
+        - Optional log stream:
+            - `./scripts/monitor_long_gpu_benchmark.sh logs`
+            - `./scripts/monitor_long_gpu_benchmark.sh log-on`
+            - `./scripts/monitor_long_gpu_benchmark.sh log-off`
 
-5. Outputs and analysis requirements
-    - Save benchmark artifacts to `results/test_scan/post_phase3_benchmark_<timestamp>.csv`
-    - Build speedup surfaces per trajectory level:
-      - `speedup(L, batch_size) = throughput_gpu / throughput_cpu`
-    - Report crossover points where speedup crosses 1.0 for each `L`
-    - Publish a short markdown report card from notebook output after each campaign run.
+5. Troubleshooting notes
+        - Empty or delayed log output can happen due stdout buffering in background mode.
+        - Treat CSV growth and visual monitor updates as source-of-truth for progress.
 
-6. Acceptance criteria for long-run campaign
-    - No OOM crashes for retained `(L, batch_size)` tuples
-    - Completed CPU+GPU rows for every retained tuple
-    - At least one `batch_size` with speedup `> 1.0` for each tested `L`
-    - Reproducible detached execution confirmed (run continues after disconnect)
+6. Extended profile (non-default, <=24h target)
+        - Use only when overnight baseline is stable.
+        - Expand to `L_values = [64, 128]` and/or add `n_steps = 30000` with reduced trajectory counts.
+
+7. Acceptance criteria
+        - Campaign remains detached and stable after terminal disconnect.
+        - ETA remains within overnight target after early-row projection.
+        - No OOM crashes for retained rows (skip-pruning is acceptable).
+        - Live PNG and terminal progress both refresh during run.
 
 
 After Phase 6 (ML data pipeline):
