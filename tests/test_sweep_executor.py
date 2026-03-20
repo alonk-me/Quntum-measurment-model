@@ -1,6 +1,7 @@
 import csv
 
 import numpy as np
+import pytest
 
 from quantum_measurement.parallel import ParameterSweepExecutor
 from quantum_measurement.parallel.sweep_executor import SweepTask
@@ -15,7 +16,7 @@ def _dummy_factory(L, gamma, backend_device, rng):
     }
 
 
-def _oom_then_cpu_factory(L, gamma, backend_device, rng):
+def _oom_factory(L, gamma, backend_device, rng):
     del rng
     if backend_device == "gpu":
         raise RuntimeError("CUDA out of memory")
@@ -131,23 +132,23 @@ class TestSweepExecutor:
         b_vals = np.array([r["value"] for r in sorted(b, key=lambda x: (x["L"], x["gamma"]))])
         assert np.allclose(a_vals, b_vals)
 
-    def test_gpu_oom_fallback_retries_on_cpu(self):
+    def test_gpu_oom_does_not_retry_on_cpu(self):
         executor = ParameterSweepExecutor(
             parallel_backend="sequential",
             n_workers=1,
             base_seed=1,
             verbose=False,
+            continue_on_error=False,
         )
-        out = executor.run_sweep(
-            L_values=[9],
-            gamma_grid=[1.0],
-            simulator_factory=_oom_then_cpu_factory,
-            backend_device="gpu",
-            output_csv=None,
-            resume=False,
-        )
-        assert len(out) == 1
-        assert out[0]["device"] == "cpu"
+        with pytest.raises(RuntimeError, match="out of memory"):
+            executor.run_sweep(
+                L_values=[9],
+                gamma_grid=[1.0],
+                simulator_factory=_oom_factory,
+                backend_device="gpu",
+                output_csv=None,
+                resume=False,
+            )
 
     def test_cpu_worker_policy_l_aware_limits(self):
         executor = ParameterSweepExecutor(

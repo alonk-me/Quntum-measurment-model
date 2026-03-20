@@ -30,14 +30,14 @@ class TestBackendFactory:
         x2 = b2.asnumpy(b2.standard_normal((4,)))
         assert np.allclose(x1, x2)
 
-    def test_gpu_falls_back_or_selects_cupy(self):
-        backend = get_backend("gpu")
+    def test_gpu_selects_cupy_or_raises(self):
         if is_cupy_available():
+            backend = get_backend("gpu")
             assert backend.name == "cupy"
             assert backend.is_gpu is True
         else:
-            assert backend.name == "numpy"
-            assert backend.is_gpu is False
+            with pytest.raises(RuntimeError, match="CuPy/CUDA unavailable"):
+                get_backend("gpu")
 
 
 class TestBackendMathParity:

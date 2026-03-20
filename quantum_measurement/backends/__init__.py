@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import warnings
 
 from .base import Backend
 from .numpy_backend import NumPyBackend
@@ -26,8 +25,7 @@ def get_backend(device: str = "cpu", seed: int | None = None) -> Backend:
             from .cupy_backend import CuPyBackend
 
             return CuPyBackend(seed=seed)
-        warnings.warn("GPU backend requested but CuPy/CUDA unavailable; falling back to NumPy backend.", RuntimeWarning)
-        return NumPyBackend(seed=seed)
+        raise RuntimeError("GPU backend requested but CuPy/CUDA unavailable.")
     raise ValueError(f"Unsupported device '{device}'. Use 'cpu' or 'gpu'.")
 
 

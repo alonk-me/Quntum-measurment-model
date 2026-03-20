@@ -73,6 +73,10 @@ CSV_HEADER = [
     "g",
     "z2_mean",
     "z2_plus_one",
+    "n_trajectories",
+    "batch_size",
+    "z2_std",
+    "z2_stderr",
     "tau",
     "T",
     "dt",
@@ -157,40 +161,70 @@ def load_existing_results(csv_file):
 # Main sweep
 # ============================================================================
 
-def _run_single_point(L, gamma, backend_device, rng):
-    del rng
-    g = gamma / (4 * J_GLOBAL)
-    T, dt, N_steps, tau = get_time_params(gamma)
-    epsilon = float(np.sqrt(gamma * dt))
+def _build_point_runner(
+    n_trajectories_per_point,
+    batch_size_per_point,
+    compute_uncertainty,
+):
+    def _run_single_point(L, gamma, backend_device, rng):
+        seed = int(rng.integers(0, np.iinfo(np.int32).max))
+        g = gamma / (4 * J_GLOBAL)
+        T, dt, N_steps, tau = get_time_params(gamma)
+        epsilon = float(np.sqrt(gamma * dt))
 
-    start_time = time.time()
-    sim = LQubitCorrelationSimulator(
-        L=L,
-        J=J_GLOBAL,
-        epsilon=epsilon,
-        N_steps=N_steps,
-        T=T,
-        closed_boundary=True,
-        device=backend_device,
-    )
-    z2_mean = float(sim.simulate_z2_mean())
-    z2_plus_one = 1.0 + z2_mean
-    runtime = time.time() - start_time
+        start_time = time.time()
+        sim = LQubitCorrelationSimulator(
+            L=L,
+            J=J_GLOBAL,
+            epsilon=epsilon,
+            N_steps=N_steps,
+            T=T,
+            closed_boundary=True,
+            device=backend_device,
+            rng=np.random.default_rng(seed),
+        )
 
-    return {
-        "timestamp": datetime.now().isoformat(),
-        "L": int(L),
-        "gamma": float(gamma),
-        "g": float(g),
-        "z2_mean": z2_mean,
-        "z2_plus_one": z2_plus_one,
-        "tau": float(tau),
-        "T": float(T),
-        "dt": float(dt),
-        "N_steps": int(N_steps),
-        "epsilon": epsilon,
-        "runtime_sec": float(runtime),
-    }
+        # Ensure backend RNG is reproducible for batched device-side sampling.
+        if hasattr(sim.backend, "seed"):
+            sim.backend.seed(seed)
+
+        batch_size_used = int(batch_size_per_point) if batch_size_per_point is not None else None
+        result = sim.simulate_z2_mean_ensemble(
+            n_trajectories=int(n_trajectories_per_point),
+            batch_size=batch_size_used,
+            return_std_err=bool(compute_uncertainty),
+        )
+
+        if compute_uncertainty:
+            z2_mean, z2_std, z2_stderr = result
+        else:
+            z2_mean = float(result)
+            z2_std = float("nan")
+            z2_stderr = float("nan")
+
+        z2_plus_one = 1.0 + z2_mean
+        runtime = time.time() - start_time
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "L": int(L),
+            "gamma": float(gamma),
+            "g": float(g),
+            "z2_mean": float(z2_mean),
+            "z2_plus_one": float(z2_plus_one),
+            "n_trajectories": int(n_trajectories_per_point),
+            "batch_size": batch_size_used,
+            "z2_std": float(z2_std),
+            "z2_stderr": float(z2_stderr),
+            "tau": float(tau),
+            "T": float(T),
+            "dt": float(dt),
+            "N_steps": int(N_steps),
+            "epsilon": epsilon,
+            "runtime_sec": float(runtime),
+        }
+
+    return _run_single_point
 
 
 def run_parameter_sweep(
@@ -202,6 +236,9 @@ def run_parameter_sweep(
     resume=True,
     l_values_override=None,
     gamma_grid_override=None,
+    n_trajectories_per_point=1,
+    batch_size_per_point=None,
+    compute_uncertainty=False,
 ):
     print("=" * 80)
     print("1+<z^2> PARAMETER SWEEP")
@@ -224,6 +261,9 @@ def run_parameter_sweep(
     print(f"  g range: [{g_grid.min():.3e}, {g_grid.max():.3e}]")
     print(f"  N_gamma points: {len(gamma_grid)}")
     print(f"  Total runs: {len(L_values) * len(gamma_grid)}")
+    print(f"  trajectories per point: {int(n_trajectories_per_point)}")
+    print(f"  batch size per point: {batch_size_per_point if batch_size_per_point is not None else 'auto'}")
+    print(f"  compute uncertainty: {bool(compute_uncertainty)}")
     print()
 
     if resume and csv_file.exists():
@@ -239,10 +279,16 @@ def run_parameter_sweep(
         continue_on_error=True,
     )
 
+    point_runner = _build_point_runner(
+        n_trajectories_per_point=n_trajectories_per_point,
+        batch_size_per_point=batch_size_per_point,
+        compute_uncertainty=compute_uncertainty,
+    )
+
     _ = executor.run_sweep(
         L_values=L_values,
         gamma_grid=gamma_grid,
-        simulator_factory=_run_single_point,
+        simulator_factory=point_runner,
         backend_device=backend_device,
         output_csv=csv_file,
         resume=resume,
@@ -381,6 +427,9 @@ def main():
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--l-values", nargs="+", type=int, default=None)
     parser.add_argument("--gamma-values", nargs="+", type=float, default=None)
+    parser.add_argument("--n-trajectories-per-point", type=int, default=1)
+    parser.add_argument("--batch-size-per-point", type=int, default=None)
+    parser.add_argument("--compute-uncertainty", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
 
     args = parser.parse_args()
@@ -395,6 +444,9 @@ def main():
         resume=(not args.no_resume),
         l_values_override=args.l_values,
         gamma_grid_override=args.gamma_values,
+        n_trajectories_per_point=args.n_trajectories_per_point,
+        batch_size_per_point=args.batch_size_per_point,
+        compute_uncertainty=args.compute_uncertainty,
     )
     if not args.skip_plots:
         generate_verification_plots(csv_file)

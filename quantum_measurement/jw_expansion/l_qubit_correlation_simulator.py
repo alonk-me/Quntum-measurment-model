@@ -447,6 +447,85 @@ class LQubitCorrelationSimulator:
         total_samples = (self.N_steps + 1) * self.L
         return sum_z2 / total_samples
 
+    def simulate_z2_mean_ensemble(
+        self,
+        n_trajectories: int,
+        batch_size: int | None = None,
+        return_std_err: bool = False,
+    ) -> float | tuple[float, float, float]:
+        r"""Compute mean z^2 over an ensemble without storing full trajectories.
+
+        This method is designed for long parameter sweeps where retaining full
+        trajectory tensors is unnecessary. It uses the batched trajectory update
+        path and backend RNG (`choice_pm1`), enabling fully device-side random
+        generation for GPU runs.
+
+        Parameters
+        ----------
+        n_trajectories : int
+            Number of independent trajectories to average.
+        batch_size : int | None, optional
+            Number of trajectories per batch. If ``None``, GPU uses
+            ``estimate_trajectory_batch_size(L)`` and CPU defaults to 1.
+        return_std_err : bool, optional
+            If ``True``, also return the sample standard deviation and standard
+            error of per-trajectory z^2 means.
+
+        Returns
+        -------
+        float | tuple[float, float, float]
+            Mean z^2 over trajectories. If ``return_std_err`` is true, returns
+            ``(mean, std, stderr)``.
+        """
+        if n_trajectories < 1:
+            raise ValueError("n_trajectories must be at least 1")
+
+        if batch_size is None:
+            if self.backend.is_gpu:
+                batch_size = min(n_trajectories, estimate_trajectory_batch_size(self.L))
+            else:
+                batch_size = 1
+        batch_size = max(1, int(batch_size))
+
+        samples_per_traj = (self.N_steps + 1) * self.L
+        mean_sum = 0.0
+        mean_sq_sum = 0.0
+        counted = 0
+
+        for start_idx in range(0, n_trajectories, batch_size):
+            end_idx = min(start_idx + batch_size, n_trajectories)
+            current_batch = end_idx - start_idx
+
+            G_batch = self.backend.zeros((current_batch, 2 * self.L, 2 * self.L), dtype=complex)
+            for idx in range(current_batch):
+                G_batch[idx] = self.G_initial
+
+            z_batch = self._compute_z_values_batch(G_batch)
+            z2_sum = np.sum(z_batch ** 2, axis=1)
+
+            for _ in range(self.N_steps):
+                G_batch = self._hamiltonian_step_batch(G_batch)
+                xi_step = self.backend.choice_pm1((current_batch, self.L))
+                G_batch = self._measurement_step_batch(G_batch, xi_step)
+                z_batch = self._compute_z_values_batch(G_batch)
+                z2_sum += np.sum(z_batch ** 2, axis=1)
+
+            traj_means = z2_sum / samples_per_traj
+            mean_sum += float(np.sum(traj_means))
+            counted += current_batch
+
+            if return_std_err:
+                mean_sq_sum += float(np.sum(traj_means ** 2))
+
+        mean_z2 = mean_sum / max(counted, 1)
+        if not return_std_err:
+            return mean_z2
+
+        var = max((mean_sq_sum / max(counted, 1)) - (mean_z2 ** 2), 0.0)
+        std = float(np.sqrt(var))
+        stderr = std / float(np.sqrt(max(counted, 1)))
+        return mean_z2, std, stderr
+
     def simulate_ensemble(
         self,
         n_trajectories: int,

@@ -28,12 +28,6 @@ def _detect_gpu_count() -> int:
     except Exception:
         return 0
 
-
-def _is_gpu_oom_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return "out of memory" in msg or "cuda_error_out_of_memory" in msg or "cudamemoryerror" in msg
-
-
 def _execute_task(
     task: SweepTask,
     simulator_factory: Callable[[int, float, str, np.random.Generator], dict[str, Any]],
@@ -85,6 +79,9 @@ class ParameterSweepExecutor:
         if self.parallel_backend == "ray":
             raise NotImplementedError("Ray backend is deferred in this phase; use sequential or multiprocessing.")
 
+        if backend_device == "gpu" and _detect_gpu_count() < 1:
+            raise RuntimeError("GPU backend requested but no CUDA devices are available or CuPy is not installed.")
+
         csv_path = Path(output_csv) if output_csv is not None else None
         completed: set[tuple[int, float]] = set()
         if csv_path is not None and resume and csv_path.exists():
@@ -118,22 +115,6 @@ class ParameterSweepExecutor:
             requested = max(1, (requested * 3) // 4)
 
         return min(requested, len(tasks))
-
-    def _retry_on_gpu_oom(
-        self,
-        task: SweepTask,
-        simulator_factory: Callable[[int, float, str, np.random.Generator], dict[str, Any]],
-        seed: int,
-        exc: Exception,
-    ) -> dict[str, Any] | None:
-        if not _is_gpu_oom_error(exc):
-            return None
-        if self.verbose:
-            warnings.warn(
-                f"GPU OOM at L={task.L}, gamma={task.gamma}; retrying this task on CPU.",
-                RuntimeWarning,
-            )
-        return _execute_task(task, simulator_factory, "cpu", seed, None)
 
     def _build_tasks(
         self,
@@ -178,14 +159,6 @@ class ParameterSweepExecutor:
                     self._append_result_row(csv_path, row, csv_header)
                 results.append(row)
             except Exception as exc:
-                if backend_device == "gpu":
-                    retry_row = self._retry_on_gpu_oom(task, simulator_factory, seeds[idx], exc)
-                    if retry_row is not None:
-                        self._validate_row(retry_row)
-                        if csv_path is not None:
-                            self._append_result_row(csv_path, retry_row, csv_header)
-                        results.append(retry_row)
-                        continue
                 if self.continue_on_error:
                     warnings.warn(f"Task failed for L={task.L}, gamma={task.gamma}: {exc}", RuntimeWarning)
                 else:
@@ -236,14 +209,6 @@ class ParameterSweepExecutor:
                         self._append_result_row(csv_path, row, csv_header)
                     results.append(row)
                 except Exception as exc:
-                    if backend_device == "gpu":
-                        retry_row = self._retry_on_gpu_oom(task, simulator_factory, seed, exc)
-                        if retry_row is not None:
-                            self._validate_row(retry_row)
-                            if csv_path is not None:
-                                self._append_result_row(csv_path, retry_row, csv_header)
-                            results.append(retry_row)
-                            continue
                     if self.continue_on_error:
                         warnings.warn(f"Task failed for L={task.L}, gamma={task.gamma}: {exc}", RuntimeWarning)
                     else:

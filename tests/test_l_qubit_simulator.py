@@ -227,3 +227,64 @@ class TestSimulateEnsemble:
         assert Q_vals.shape == (7,)
         assert z_series.shape == (7, sim.N_steps + 1, sim.L)
         assert xi_series.shape == (7, sim.N_steps, sim.L)
+
+
+class TestSimulateZ2Ensemble:
+    """Tests for simulate_z2_mean_ensemble."""
+
+    def test_single_trajectory_matches_serial_z2(self):
+        sim = LQubitCorrelationSimulator(
+            L=3,
+            J=1.0,
+            epsilon=0.1,
+            N_steps=40,
+            T=1.0,
+            closed_boundary=True,
+            rng=np.random.default_rng(123),
+        )
+        if hasattr(sim.backend, "seed"):
+            sim.backend.seed(123)
+
+        z2_single = sim.simulate_z2_mean()
+
+        sim2 = LQubitCorrelationSimulator(
+            L=3,
+            J=1.0,
+            epsilon=0.1,
+            N_steps=40,
+            T=1.0,
+            closed_boundary=True,
+            rng=np.random.default_rng(123),
+        )
+        if hasattr(sim2.backend, "seed"):
+            sim2.backend.seed(123)
+        z2_ensemble = sim2.simulate_z2_mean_ensemble(n_trajectories=1, batch_size=1)
+
+        assert np.isfinite(z2_single)
+        assert np.isfinite(z2_ensemble)
+        assert z2_ensemble == pytest.approx(z2_single, rel=1e-8, abs=1e-8)
+
+    def test_ensemble_uncertainty_outputs(self):
+        sim = LQubitCorrelationSimulator(
+            L=3,
+            J=1.0,
+            epsilon=0.1,
+            N_steps=30,
+            T=1.0,
+            closed_boundary=True,
+            rng=np.random.default_rng(7),
+        )
+        if hasattr(sim.backend, "seed"):
+            sim.backend.seed(7)
+
+        mean, std, stderr = sim.simulate_z2_mean_ensemble(
+            n_trajectories=5,
+            batch_size=2,
+            return_std_err=True,
+        )
+
+        assert np.isfinite(mean)
+        assert np.isfinite(std)
+        assert np.isfinite(stderr)
+        assert std >= 0.0
+        assert stderr >= 0.0
