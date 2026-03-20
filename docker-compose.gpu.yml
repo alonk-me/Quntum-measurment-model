@@ -1,0 +1,24 @@
+services:
+  qm-gpu-shell:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quantum-measurements:gpu
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+    gpus: all
+    stdin_open: true
+    tty: true
+    command: bash
+
+  qm-gpu-verify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quantum-measurements:gpu
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+    gpus: all
+    command: bash -lc "./scripts/run_post_phase3_verification.sh"

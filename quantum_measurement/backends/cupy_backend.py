@@ -98,8 +98,10 @@ class CuPyBackend(Backend):
         return self.rng.standard_normal(shape)
 
     def choice_pm1(self, shape: tuple[int, ...]) -> Any:
-        # Draw from {-1, +1} directly on device to avoid host round-trips.
-        return self.rng.choice(cp.array([-1, 1], dtype=cp.int8), size=shape)
+        # Draw from {-1, +1} directly on device using Generator.random,
+        # which is available across CuPy RNG Generator versions.
+        pm = (self.rng.random(shape) < 0.5).astype(cp.int8)
+        return (pm * 2 - 1).astype(cp.int8)
 
     def get_workspace(self, key: str, shape: tuple[int, ...], dtype: Any) -> Any:
         if cp is None:

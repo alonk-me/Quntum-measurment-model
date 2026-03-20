@@ -193,6 +193,20 @@ After Phase 1–3 (GPU acceleration):
 - Run CPU baseline with the same grid:
     `python scripts/run_ninf_scan.py --device cpu --parallel-backend sequential --l-values 9 17 --gamma-values 0.4 1.0 4.0 --skip-plots`
 - Compare GPU vs CPU outputs on shared `(L,γ)` points; require |Δn_∞|/max(|n_∞|,1e-12) ≤ 1%
+- Dockerized option (recommended for environment reproducibility):
+    `docker compose -f docker-compose.gpu.yml build`
+    `docker compose -f docker-compose.gpu.yml run --rm qm-gpu-verify`
+
+
+## Post-Phase-3 Report Card ✅
+
+- Correctness threshold (<=1%): **PASS**
+- Overlap points compared: **6**
+- Max relative difference: **3.367e-15**
+- Mean relative difference: **1.021e-15**
+- Small-sweep runtime ratio (GPU/CPU): **10.69x**
+- Best benchmark speedup: **1.14x** at batch size **32**
+
 
 After Phase 6 (ML data pipeline):
 - Generate test dataset: 1000 trajectories with balanced class labels
