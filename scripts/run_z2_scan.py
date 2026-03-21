@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import csv
+import functools
 import sys
 import time
 from datetime import datetime
@@ -32,6 +33,7 @@ from quantum_measurement.jw_expansion.l_qubit_correlation_simulator import (
     LQubitCorrelationSimulator,
 )
 from quantum_measurement.parallel import ParameterSweepExecutor
+from quantum_measurement.backends import MultiCpuBackend, MultiCpuBackendConfig
 
 # ============================================================================
 # Configuration Parameters
@@ -161,76 +163,91 @@ def load_existing_results(csv_file):
 # Main sweep
 # ============================================================================
 
+def _run_single_point_with_config(
+    L,
+    gamma,
+    backend_device,
+    rng,
+    n_trajectories_per_point,
+    batch_size_per_point,
+    compute_uncertainty,
+):
+    seed = int(rng.integers(0, np.iinfo(np.int32).max))
+    g = gamma / (4 * J_GLOBAL)
+    T, dt, N_steps, tau = get_time_params(gamma)
+    epsilon = float(np.sqrt(gamma * dt))
+
+    start_time = time.time()
+    sim = LQubitCorrelationSimulator(
+        L=L,
+        J=J_GLOBAL,
+        epsilon=epsilon,
+        N_steps=N_steps,
+        T=T,
+        closed_boundary=True,
+        device=backend_device,
+        rng=np.random.default_rng(seed),
+    )
+
+    # Ensure backend RNG is reproducible for batched device-side sampling.
+    if hasattr(sim.backend, "seed"):
+        sim.backend.seed(seed)
+
+    batch_size_used = int(batch_size_per_point) if batch_size_per_point is not None else None
+    result = sim.simulate_z2_mean_ensemble(
+        n_trajectories=int(n_trajectories_per_point),
+        batch_size=batch_size_used,
+        return_std_err=bool(compute_uncertainty),
+    )
+
+    if compute_uncertainty:
+        z2_mean, z2_std, z2_stderr = result
+    else:
+        z2_mean = float(result)
+        z2_std = float("nan")
+        z2_stderr = float("nan")
+
+    z2_plus_one = 1.0 + z2_mean
+    runtime = time.time() - start_time
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "L": int(L),
+        "gamma": float(gamma),
+        "g": float(g),
+        "z2_mean": float(z2_mean),
+        "z2_plus_one": float(z2_plus_one),
+        "n_trajectories": int(n_trajectories_per_point),
+        "batch_size": batch_size_used,
+        "z2_std": float(z2_std),
+        "z2_stderr": float(z2_stderr),
+        "tau": float(tau),
+        "T": float(T),
+        "dt": float(dt),
+        "N_steps": int(N_steps),
+        "epsilon": epsilon,
+        "runtime_sec": float(runtime),
+    }
+
+
 def _build_point_runner(
     n_trajectories_per_point,
     batch_size_per_point,
     compute_uncertainty,
 ):
-    def _run_single_point(L, gamma, backend_device, rng):
-        seed = int(rng.integers(0, np.iinfo(np.int32).max))
-        g = gamma / (4 * J_GLOBAL)
-        T, dt, N_steps, tau = get_time_params(gamma)
-        epsilon = float(np.sqrt(gamma * dt))
-
-        start_time = time.time()
-        sim = LQubitCorrelationSimulator(
-            L=L,
-            J=J_GLOBAL,
-            epsilon=epsilon,
-            N_steps=N_steps,
-            T=T,
-            closed_boundary=True,
-            device=backend_device,
-            rng=np.random.default_rng(seed),
-        )
-
-        # Ensure backend RNG is reproducible for batched device-side sampling.
-        if hasattr(sim.backend, "seed"):
-            sim.backend.seed(seed)
-
-        batch_size_used = int(batch_size_per_point) if batch_size_per_point is not None else None
-        result = sim.simulate_z2_mean_ensemble(
-            n_trajectories=int(n_trajectories_per_point),
-            batch_size=batch_size_used,
-            return_std_err=bool(compute_uncertainty),
-        )
-
-        if compute_uncertainty:
-            z2_mean, z2_std, z2_stderr = result
-        else:
-            z2_mean = float(result)
-            z2_std = float("nan")
-            z2_stderr = float("nan")
-
-        z2_plus_one = 1.0 + z2_mean
-        runtime = time.time() - start_time
-
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "L": int(L),
-            "gamma": float(gamma),
-            "g": float(g),
-            "z2_mean": float(z2_mean),
-            "z2_plus_one": float(z2_plus_one),
-            "n_trajectories": int(n_trajectories_per_point),
-            "batch_size": batch_size_used,
-            "z2_std": float(z2_std),
-            "z2_stderr": float(z2_stderr),
-            "tau": float(tau),
-            "T": float(T),
-            "dt": float(dt),
-            "N_steps": int(N_steps),
-            "epsilon": epsilon,
-            "runtime_sec": float(runtime),
-        }
-
-    return _run_single_point
+    return functools.partial(
+        _run_single_point_with_config,
+        n_trajectories_per_point=n_trajectories_per_point,
+        batch_size_per_point=batch_size_per_point,
+        compute_uncertainty=compute_uncertainty,
+    )
 
 
 def run_parameter_sweep(
     csv_file,
     backend_device="cpu",
     parallel_backend="sequential",
+    executor_kind="parameter_sweep",
     n_workers=None,
     base_seed=42,
     resume=True,
@@ -271,13 +288,22 @@ def run_parameter_sweep(
         print(f"Resuming: {len(completed)} runs already completed")
         print()
 
-    executor = ParameterSweepExecutor(
-        parallel_backend=parallel_backend,
-        n_workers=n_workers,
-        base_seed=base_seed,
-        verbose=True,
-        continue_on_error=True,
-    )
+    if executor_kind == "multi_cpu":
+        cfg = MultiCpuBackendConfig(
+            max_workers=(n_workers if n_workers is not None else 38),
+            master_seed=base_seed,
+        )
+        executor = MultiCpuBackend(config=cfg)
+        print(f"Executor: multi_cpu (workers={cfg.max_workers}, reserve_cores={cfg.reserve_cores})")
+    else:
+        executor = ParameterSweepExecutor(
+            parallel_backend=parallel_backend,
+            n_workers=n_workers,
+            base_seed=base_seed,
+            verbose=True,
+            continue_on_error=True,
+        )
+        print(f"Executor: parameter_sweep ({parallel_backend})")
 
     point_runner = _build_point_runner(
         n_trajectories_per_point=n_trajectories_per_point,
@@ -422,6 +448,12 @@ def main():
         choices=["sequential", "multiprocessing"],
         default="sequential",
     )
+    parser.add_argument(
+        "--executor",
+        choices=["parameter_sweep", "multi_cpu"],
+        default="parameter_sweep",
+        help="Executor implementation to use. 'multi_cpu' enables strict core-affinity backend.",
+    )
     parser.add_argument("--n-workers", type=int, default=None)
     parser.add_argument("--base-seed", type=int, default=42)
     parser.add_argument("--no-resume", action="store_true")
@@ -439,6 +471,7 @@ def main():
         csv_file,
         backend_device=args.device,
         parallel_backend=args.parallel_backend,
+        executor_kind=args.executor,
         n_workers=args.n_workers,
         base_seed=args.base_seed,
         resume=(not args.no_resume),

@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from quantum_measurement.jw_expansion.non_hermitian_hat import NonHermitianHatSimulator
 from quantum_measurement.jw_expansion.n_infty import sum_pbc, integral_expr
 from quantum_measurement.parallel import ParameterSweepExecutor
+from quantum_measurement.backends import MultiCpuBackend, MultiCpuBackendConfig
 
 # Configure matplotlib for publication-quality plots
 plt.rcParams['figure.dpi'] = 300
@@ -402,6 +403,7 @@ def run_parameter_sweep(
     csv_file: Path,
     backend_device: str,
     parallel_backend: str,
+    executor_kind: str,
     n_workers: int | None,
     base_seed: int,
     resume: bool,
@@ -452,13 +454,22 @@ def run_parameter_sweep(
         print(f"⟳ Resuming: {len(completed)} runs already completed")
         print()
 
-    executor = ParameterSweepExecutor(
-        parallel_backend=parallel_backend,
-        n_workers=n_workers,
-        base_seed=base_seed,
-        verbose=True,
-        continue_on_error=True,
-    )
+    if executor_kind == "multi_cpu":
+        cfg = MultiCpuBackendConfig(
+            max_workers=(n_workers if n_workers is not None else 38),
+            master_seed=base_seed,
+        )
+        executor = MultiCpuBackend(config=cfg)
+        print(f"Executor: multi_cpu (workers={cfg.max_workers}, reserve_cores={cfg.reserve_cores})")
+    else:
+        executor = ParameterSweepExecutor(
+            parallel_backend=parallel_backend,
+            n_workers=n_workers,
+            base_seed=base_seed,
+            verbose=True,
+            continue_on_error=True,
+        )
+        print(f"Executor: parameter_sweep ({parallel_backend})")
 
     _ = executor.run_sweep(
         L_values=L_values,
@@ -629,6 +640,12 @@ def main():
         choices=["sequential", "multiprocessing", "ray"],
         default="sequential",
     )
+    parser.add_argument(
+        "--executor",
+        choices=["parameter_sweep", "multi_cpu"],
+        default="parameter_sweep",
+        help="Executor implementation to use. 'multi_cpu' enables strict core-affinity backend.",
+    )
     parser.add_argument("--n-workers", type=int, default=None)
     parser.add_argument("--n-trajectories", type=int, default=None)
     parser.add_argument("--base-seed", type=int, default=42)
@@ -654,6 +671,7 @@ def main():
             csv_file=csv_file,
             backend_device=args.device,
             parallel_backend=args.parallel_backend,
+            executor_kind=args.executor,
             n_workers=args.n_workers,
             base_seed=args.base_seed,
             resume=(not args.no_resume),

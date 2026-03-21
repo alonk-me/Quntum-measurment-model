@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 
 from .base import Backend
+from .multi_cpu_backend import MultiCpuBackend, MultiCpuBackendConfig
 from .numpy_backend import NumPyBackend
 
 
@@ -31,6 +32,8 @@ def get_backend(device: str = "cpu", seed: int | None = None) -> Backend:
 
 __all__ = [
     "Backend",
+    "MultiCpuBackend",
+    "MultiCpuBackendConfig",
     "NumPyBackend",
     "get_backend",
     "is_cupy_available",
