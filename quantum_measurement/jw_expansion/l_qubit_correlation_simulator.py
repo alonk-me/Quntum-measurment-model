@@ -124,6 +124,7 @@ class LQubitCorrelationSimulator:
     use_stable_integrator: bool = False
     enable_stability_monitor: bool = False
     stable_projector_enforce: bool = True
+    bdg_enforce_threshold: float | None = None
     backend: Backend | None = field(default=None, repr=False)
     rng: Optional[np.random.Generator] = field(default=None, repr=False)
 
@@ -354,6 +355,51 @@ class LQubitCorrelationSimulator:
         if bdg > self._stability_monitor.bdg_threshold:
             _LOGGER.warning("BdG residual exceeded threshold: %.3e", bdg)
 
+    def _bdg_residual_fro(self, G: Any) -> float:
+        g_np = np.asarray(self.backend.asnumpy(G), dtype=complex)
+        tau_y = np.asarray(self.backend.asnumpy(self._tau_y), dtype=complex)
+        identity = np.eye(2 * self.L, dtype=complex)
+        return float(np.linalg.norm(tau_y @ g_np.conj() @ tau_y + g_np - identity, ord="fro"))
+
+    def _bdg_residual_fro_batch(self, G_batch: Any) -> np.ndarray:
+        g_np = np.asarray(self.backend.asnumpy(G_batch), dtype=complex)
+        tau_y = np.asarray(self.backend.asnumpy(self._tau_y), dtype=complex)
+        identity = np.eye(2 * self.L, dtype=complex)
+        residuals = np.empty(g_np.shape[0], dtype=float)
+        for idx in range(g_np.shape[0]):
+            g = g_np[idx]
+            residuals[idx] = float(np.linalg.norm(tau_y @ g.conj() @ tau_y + g - identity, ord="fro"))
+        return residuals
+
+    def _maybe_enforce_bdg(self, G: Any) -> Any:
+        threshold = self.bdg_enforce_threshold
+        if threshold is None:
+            return self._enforce_bdg(G)
+        if self._bdg_residual_fro(G) > float(threshold):
+            return self._enforce_bdg(G)
+        return G
+
+    def _maybe_enforce_bdg_batch(self, G_batch: Any) -> Any:
+        threshold = self.bdg_enforce_threshold
+        if threshold is None:
+            return self._enforce_bdg_batch(G_batch)
+
+        residuals = self._bdg_residual_fro_batch(G_batch)
+        mask = residuals > float(threshold)
+        if not np.any(mask):
+            return G_batch
+        if np.all(mask):
+            return self._enforce_bdg_batch(G_batch)
+
+        g_np = np.asarray(self.backend.asnumpy(G_batch), dtype=complex)
+        tau_y = np.asarray(self.backend.asnumpy(self._tau_y), dtype=complex)
+        identity = np.eye(2 * self.L, dtype=complex)
+        for idx in np.where(mask)[0]:
+            g = g_np[idx]
+            g_ph = identity - tau_y @ g.conj() @ tau_y
+            g_np[idx] = 0.5 * (g + g_ph)
+        return self.backend.array(g_np, dtype=complex)
+
     def get_stability_monitor_data(self) -> dict[str, np.ndarray]:
         if self._stability_monitor is None:
             return {"projector": np.array([], dtype=float), "hermitian": np.array([], dtype=float), "bdg": np.array([], dtype=float)}
@@ -483,26 +529,24 @@ class LQubitCorrelationSimulator:
         return G_new
 
     def _stable_step_single(self, G: Any) -> Tuple[Any, np.ndarray]:
+        # Stable update order: exact Hamiltonian -> measurement -> single BdG enforcement -> Hermiticity.
         G = self._hamiltonian_step(G)
-        G = self._enforce_bdg(G)
         G, xi = self._measurement_step(G, apply_projection=False)
-        G = self._enforce_bdg(G)
+        G = self._maybe_enforce_bdg(G)
         G = self._enforce_hermiticity(G)
         if self.stable_projector_enforce:
             G = self._enforce_projector(G)
-            G = self._enforce_bdg(G)
             G = self._enforce_hermiticity(G)
         return G, xi
 
     def _stable_step_batch(self, G_batch: Any, xi_step: Any) -> Any:
+        # Batch variant follows the same stable update order as the single-trajectory path.
         G_batch = self._hamiltonian_step_batch(G_batch)
-        G_batch = self._enforce_bdg_batch(G_batch)
         G_batch = self._measurement_step_batch(G_batch, xi_step, apply_projection=False)
-        G_batch = self._enforce_bdg_batch(G_batch)
+        G_batch = self._maybe_enforce_bdg_batch(G_batch)
         G_batch = self._enforce_hermiticity_batch(G_batch)
         if self.stable_projector_enforce:
             G_batch = self._enforce_projector_batch(G_batch)
-            G_batch = self._enforce_bdg_batch(G_batch)
             G_batch = self._enforce_hermiticity_batch(G_batch)
         return G_batch
 

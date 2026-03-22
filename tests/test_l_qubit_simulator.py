@@ -36,7 +36,7 @@ def validate_stable_evolution(gamma: float, L: int = 16) -> Dict[str, float]:
 
     _, z_traj, _ = sim.simulate_trajectory()
     monitor = sim.get_stability_monitor_data()
-    z2 = float(np.sum(z_traj[-1] ** 2))
+    z2 = float(np.mean(z_traj[-1] ** 2))
 
     return {
         "projector_max": float(np.max(monitor["projector"])) if monitor["projector"].size else float("inf"),
@@ -354,16 +354,41 @@ class TestSimulateZ2Ensemble:
 
 
 class TestStableIntegrator:
+    @pytest.mark.parametrize("L", [8, 16, 32])
+    @pytest.mark.parametrize("gamma", [0.5, 2.0, 5.0])
+    def test_z2_not_saturated(self, L, gamma):
+        _, dt, _, _ = get_time_params(gamma)
+        n_steps = 256
+        T = float(dt * n_steps)
+        epsilon = float(np.sqrt(gamma * dt))
+
+        sim = LQubitCorrelationSimulator(
+            L=L,
+            J=1.0,
+            epsilon=epsilon,
+            N_steps=n_steps,
+            T=T,
+            closed_boundary=True,
+            device="cpu",
+            use_stable_integrator=True,
+            enable_stability_monitor=True,
+            rng=np.random.default_rng(2026),
+        )
+
+        z2 = sim.simulate_z2_mean()
+        assert np.isfinite(z2)
+        assert 0.01 < z2 < 1.99
+
     @pytest.mark.parametrize("gamma", [0.1, 0.5, 1.0, 5.0, 10.0])
     def test_validate_stable_evolution_gamma_sweep(self, gamma):
         result = validate_stable_evolution(gamma=gamma, L=16)
         assert result["projector_max"] < 1e-8
         assert result["bdg_max"] < 1e-8
         assert bool(result["z2_is_finite"])
-        assert abs(result["z2"] - round(result["z2"])) < 0.1
+        assert 0.01 < result["z2"] < 1.99
 
-    def test_euler_vs_stable_small_dt_regression(self):
-        L = 2
+    def test_stable_vs_euler_agree_small_dt(self):
+        L = 3
         dt = 1e-5
         n_steps = 10
         T = dt * n_steps
@@ -391,15 +416,90 @@ class TestStableIntegrator:
             device="cpu",
             use_stable_integrator=True,
             stable_projector_enforce=False,
+            bdg_enforce_threshold=1e9,
             rng=np.random.default_rng(11),
         )
 
         G_euler = np.asarray(sim_euler.G_initial, dtype=complex)[None, :, :]
         G_stable = np.asarray(sim_stable.G_initial, dtype=complex)[None, :, :]
+        xi_rng = np.random.default_rng(42)
 
         for _ in range(n_steps):
             G_euler = sim_euler._hamiltonian_step_batch(G_euler)
-            G_stable = sim_stable._hamiltonian_step_batch(G_stable)
+            xi_step = xi_rng.choice([-1, 1], size=(1, L)).astype(np.int8)
+            G_euler = sim_euler._measurement_step_batch(G_euler, xi_step, apply_projection=False)
+            G_euler = sim_euler._enforce_hermiticity_batch(G_euler)
+
+            G_stable = sim_stable._stable_step_batch(G_stable, xi_step)
 
         diff = np.linalg.norm(G_euler[0] - G_stable[0], ord="fro")
         assert diff < 1e-8
+
+    def test_no_mixed_state_drift(self):
+        gamma = 2.0
+        dt = 1e-3
+        n_steps = 500
+        epsilon = float(np.sqrt(gamma * dt))
+
+        sim = LQubitCorrelationSimulator(
+            L=16,
+            J=1.0,
+            epsilon=epsilon,
+            N_steps=n_steps,
+            T=dt * n_steps,
+            closed_boundary=True,
+            device="cpu",
+            use_stable_integrator=True,
+            enable_stability_monitor=True,
+            rng=np.random.default_rng(42),
+        )
+
+        G = sim.backend.copy(sim.G_initial)
+        i_over_2 = 0.5 * np.eye(2 * sim.L, dtype=complex)
+        sample_steps = []
+        distances = []
+
+        for step in range(n_steps):
+            G, _ = sim._stable_step_single(G)
+            if (step + 1) % 50 == 0:
+                g_np = np.asarray(sim.backend.asnumpy(G), dtype=complex)
+                sample_steps.append(step + 1)
+                distances.append(float(np.linalg.norm(g_np - i_over_2, ord="fro")))
+
+        slope = float(np.polyfit(np.asarray(sample_steps, dtype=float), np.asarray(distances, dtype=float), 1)[0])
+        assert slope > -1e-4
+
+    def test_lazy_enforcement_fires_on_threshold(self):
+        sim = LQubitCorrelationSimulator(
+            L=4,
+            J=1.0,
+            epsilon=0.01,
+            N_steps=4,
+            T=0.01,
+            closed_boundary=True,
+            device="cpu",
+            use_stable_integrator=True,
+            stable_projector_enforce=False,
+            bdg_enforce_threshold=1e-6,
+            rng=np.random.default_rng(42),
+        )
+
+        calls = {"count": 0}
+        original_enforce_bdg = sim._enforce_bdg
+
+        def _counting_enforce_bdg(G):
+            calls["count"] += 1
+            return original_enforce_bdg(G)
+
+        sim._enforce_bdg = _counting_enforce_bdg  # type: ignore[method-assign]
+
+        g_below = sim._enforce_bdg(sim.backend.copy(sim.G_initial))
+        calls_before = calls["count"]
+        _ = sim._maybe_enforce_bdg(g_below)
+        assert calls["count"] == calls_before
+
+        g_above = sim.backend.copy(sim.G_initial)
+        g_above[0, 1] = 0.25 + 0.0j
+        calls_before = calls["count"]
+        _ = sim._maybe_enforce_bdg(g_above)
+        assert calls["count"] == calls_before + 1
