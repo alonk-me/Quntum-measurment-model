@@ -51,9 +51,9 @@ G_CRITICAL_WIDTH = 0.4
 N_G_CRITICAL = 120
 
 # Time-step construction
-T_MULTIPLIER = 100.0  # Increased from 20 to reduce noise near phase transition
+T_MULTIPLIER = 60.0
 T_MIN = 100.0  # Increased from 10 for better convergence
-DT_RATIO = 1e-2
+DT_RATIO = 5e-3
 DT_MAX = 1e-3
 N_STEPS_WARNING = 1e8
 
@@ -171,11 +171,17 @@ def _run_single_point_with_config(
     n_trajectories_per_point,
     batch_size_per_point,
     compute_uncertainty,
+    use_stable_integrator=False,
+    enable_stability_monitor=False,
 ):
     seed = int(rng.integers(0, np.iinfo(np.int32).max))
     g = gamma / (4 * J_GLOBAL)
     T, dt, N_steps, tau = get_time_params(gamma)
     epsilon = float(np.sqrt(gamma * dt))
+    if not np.isfinite(dt) or dt <= 0.0 or dt > 1e-2:
+        raise ValueError(f"Invalid dt={dt} for L={L}, gamma={gamma}")
+    if not np.isfinite(epsilon) or epsilon <= 0.0 or epsilon > 0.5:
+        raise ValueError(f"Invalid epsilon={epsilon} for L={L}, gamma={gamma}")
 
     start_time = time.time()
     sim = LQubitCorrelationSimulator(
@@ -186,6 +192,8 @@ def _run_single_point_with_config(
         T=T,
         closed_boundary=True,
         device=backend_device,
+        use_stable_integrator=bool(use_stable_integrator),
+        enable_stability_monitor=bool(enable_stability_monitor),
         rng=np.random.default_rng(seed),
     )
 
@@ -234,12 +242,16 @@ def _build_point_runner(
     n_trajectories_per_point,
     batch_size_per_point,
     compute_uncertainty,
+    use_stable_integrator=False,
+    enable_stability_monitor=False,
 ):
     return functools.partial(
         _run_single_point_with_config,
         n_trajectories_per_point=n_trajectories_per_point,
         batch_size_per_point=batch_size_per_point,
         compute_uncertainty=compute_uncertainty,
+        use_stable_integrator=use_stable_integrator,
+        enable_stability_monitor=enable_stability_monitor,
     )
 
 
@@ -256,6 +268,8 @@ def run_parameter_sweep(
     n_trajectories_per_point=1,
     batch_size_per_point=None,
     compute_uncertainty=False,
+    use_stable_integrator=False,
+    enable_stability_monitor=False,
 ):
     print("=" * 80)
     print("1+<z^2> PARAMETER SWEEP")
@@ -281,6 +295,8 @@ def run_parameter_sweep(
     print(f"  trajectories per point: {int(n_trajectories_per_point)}")
     print(f"  batch size per point: {batch_size_per_point if batch_size_per_point is not None else 'auto'}")
     print(f"  compute uncertainty: {bool(compute_uncertainty)}")
+    print(f"  use stable integrator: {bool(use_stable_integrator)}")
+    print(f"  enable stability monitor: {bool(enable_stability_monitor)}")
     print()
 
     if resume and csv_file.exists():
@@ -309,6 +325,8 @@ def run_parameter_sweep(
         n_trajectories_per_point=n_trajectories_per_point,
         batch_size_per_point=batch_size_per_point,
         compute_uncertainty=compute_uncertainty,
+        use_stable_integrator=use_stable_integrator,
+        enable_stability_monitor=enable_stability_monitor,
     )
 
     _ = executor.run_sweep(
@@ -462,6 +480,8 @@ def main():
     parser.add_argument("--n-trajectories-per-point", type=int, default=1)
     parser.add_argument("--batch-size-per-point", type=int, default=None)
     parser.add_argument("--compute-uncertainty", action="store_true")
+    parser.add_argument("--use-stable-integrator", action="store_true")
+    parser.add_argument("--enable-stability-monitor", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
 
     args = parser.parse_args()
@@ -480,6 +500,8 @@ def main():
         n_trajectories_per_point=args.n_trajectories_per_point,
         batch_size_per_point=args.batch_size_per_point,
         compute_uncertainty=args.compute_uncertainty,
+        use_stable_integrator=args.use_stable_integrator,
+        enable_stability_monitor=args.enable_stability_monitor,
     )
     if not args.skip_plots:
         generate_verification_plots(csv_file)

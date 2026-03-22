@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.linalg import expm
 
 _ROOT = Path(__file__).parent.parent / "quantum_measurement"
 sys.path.insert(0, str(_ROOT))
@@ -112,6 +113,22 @@ class TestBackendOptimizationHooks:
         stats = backend.memory_pool_stats()
         assert "workspace_entries" in stats
 
+    def test_cpu_backend_stable_commutator_path_smoke(self):
+        backend = get_backend("cpu", seed=1)
+        G = backend.array(np.eye(2, dtype=complex))[None, :, :]
+        h = backend.array(np.array([[0, 1], [1, 0]], dtype=complex))
+        dt = 0.01
+        U = expm(-2.0j * np.asarray(h) * dt)
+
+        out = backend.batched_commutator_update(
+            G,
+            h,
+            dt=dt,
+            use_stable_integrator=True,
+            precomputed_u=U,
+        )
+        assert out.shape == (1, 2, 2)
+
     @pytest.mark.gpu
     @pytest.mark.skipif(not is_cupy_available(), reason="CuPy/CUDA unavailable")
     def test_gpu_workspace_reuse_and_pool_stats(self):
@@ -126,6 +143,22 @@ class TestBackendOptimizationHooks:
         assert "used_bytes" in stats
         assert "total_bytes" in stats
         assert stats["workspace_entries"] >= 1
+
+    @pytest.mark.gpu
+    @pytest.mark.skipif(not is_cupy_available(), reason="CuPy/CUDA unavailable")
+    def test_gpu_backend_ignores_stable_integrator_with_warning(self):
+        backend = get_backend("gpu", seed=1)
+        G = backend.array(np.eye(2, dtype=complex))[None, :, :]
+        h = backend.array(np.array([[0, 1], [1, 0]], dtype=complex))
+        with pytest.warns(RuntimeWarning, match="CPU-only"):
+            out = backend.batched_commutator_update(
+                G,
+                h,
+                dt=0.01,
+                use_stable_integrator=True,
+                warn_on_ignored_stable=True,
+            )
+        assert out.shape == (1, 2, 2)
 
 
 class TestSimulatorDeviceIntegration:

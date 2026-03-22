@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from typing import Any
+import warnings
 
 import numpy as np
 
@@ -21,6 +22,7 @@ class CuPyBackend(Backend):
         self._mempool = cp.get_default_memory_pool()
         self._pinned_mempool = cp.get_default_pinned_memory_pool()
         self._workspace: dict[tuple[str, tuple[int, ...], Any], Any] = {}
+        self._stable_warned = False
         # Fused elementwise kernel over flattened batch tensors:
         # (symmetrize + diagonal clipping) in one GPU kernel launch.
         self._sym_clip_kernel = cp.ElementwiseKernel(
@@ -126,9 +128,24 @@ class CuPyBackend(Backend):
             "workspace_entries": len(self._workspace),
         }
 
-    def batched_commutator_update(self, G_batch: Any, h: Any, dt: float) -> Any:
+    def batched_commutator_update(
+        self,
+        G_batch: Any,
+        h: Any,
+        dt: float,
+        *,
+        use_stable_integrator: bool = False,
+        precomputed_u: Any | None = None,
+        warn_on_ignored_stable: bool = False,
+    ) -> Any:
         if cp is None:
             raise RuntimeError("CuPy is not available. Cannot run GPU commutator update.")
+        if use_stable_integrator and warn_on_ignored_stable and not self._stable_warned:
+            warnings.warn(
+                "Stable integrator is currently CPU-only; CuPy backend will continue with Euler path.",
+                RuntimeWarning,
+            )
+            self._stable_warned = True
         gh = self.get_workspace("gh", tuple(G_batch.shape), G_batch.dtype)
         hg = self.get_workspace("hg", tuple(G_batch.shape), G_batch.dtype)
         cp.matmul(G_batch, h, out=gh)

@@ -2,13 +2,48 @@
 
 import sys
 from pathlib import Path
+from typing import Dict
 
 import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "quantum_measurement" / "jw_expansion"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from l_qubit_correlation_simulator import LQubitCorrelationSimulator
+from run_z2_scan import get_time_params
+
+
+def validate_stable_evolution(gamma: float, L: int = 16) -> Dict[str, float]:
+    """Run one stable trajectory and validate projector/BdG constraints."""
+    _, dt, _, _ = get_time_params(gamma)
+    n_steps = 512
+    T = float(dt * n_steps)
+    epsilon = float(np.sqrt(gamma * dt))
+
+    sim = LQubitCorrelationSimulator(
+        L=L,
+        J=1.0,
+        epsilon=epsilon,
+        N_steps=n_steps,
+        T=T,
+        closed_boundary=True,
+        device="cpu",
+        use_stable_integrator=True,
+        enable_stability_monitor=True,
+        rng=np.random.default_rng(1234),
+    )
+
+    _, z_traj, _ = sim.simulate_trajectory()
+    monitor = sim.get_stability_monitor_data()
+    z2 = float(np.sum(z_traj[-1] ** 2))
+
+    return {
+        "projector_max": float(np.max(monitor["projector"])) if monitor["projector"].size else float("inf"),
+        "bdg_max": float(np.max(monitor["bdg"])) if monitor["bdg"].size else float("inf"),
+        "z2": z2,
+        "z2_is_finite": float(np.isfinite(z2)),
+    }
 
 
 class TestLQubitInitialization:
@@ -36,6 +71,10 @@ class TestLQubitInitialization:
     def test_dt_computed(self):
         sim = LQubitCorrelationSimulator(T=2.0, N_steps=200)
         assert sim.dt == pytest.approx(0.01)
+
+    def test_invalid_epsilon_raises(self):
+        with pytest.raises(ValueError, match="epsilon"):
+            LQubitCorrelationSimulator(epsilon=0.0)
 
     def test_rng_created(self):
         sim = LQubitCorrelationSimulator(rng=None)
@@ -288,3 +327,79 @@ class TestSimulateZ2Ensemble:
         assert np.isfinite(stderr)
         assert std >= 0.0
         assert stderr >= 0.0
+
+    def test_simulate_z2_mean_returns_nan_on_non_finite_z(self):
+        sim = LQubitCorrelationSimulator(
+            L=3,
+            J=1.0,
+            epsilon=0.1,
+            N_steps=5,
+            T=1.0,
+            closed_boundary=True,
+            rng=np.random.default_rng(11),
+        )
+
+        original_compute = sim._compute_z_values
+        calls = {"count": 0}
+
+        def _patched_compute(G):
+            calls["count"] += 1
+            if calls["count"] >= 2:
+                return np.array([np.nan] * sim.L, dtype=float)
+            return original_compute(G)
+
+        sim._compute_z_values = _patched_compute  # type: ignore[method-assign]
+        out = sim.simulate_z2_mean()
+        assert np.isnan(out)
+
+
+class TestStableIntegrator:
+    @pytest.mark.parametrize("gamma", [0.1, 0.5, 1.0, 5.0, 10.0])
+    def test_validate_stable_evolution_gamma_sweep(self, gamma):
+        result = validate_stable_evolution(gamma=gamma, L=16)
+        assert result["projector_max"] < 1e-8
+        assert result["bdg_max"] < 1e-8
+        assert bool(result["z2_is_finite"])
+        assert abs(result["z2"] - round(result["z2"])) < 0.1
+
+    def test_euler_vs_stable_small_dt_regression(self):
+        L = 2
+        dt = 1e-5
+        n_steps = 10
+        T = dt * n_steps
+        gamma = 0.5
+        epsilon = float(np.sqrt(gamma * dt))
+
+        sim_euler = LQubitCorrelationSimulator(
+            L=L,
+            J=0.1,
+            epsilon=epsilon,
+            N_steps=n_steps,
+            T=T,
+            closed_boundary=True,
+            device="cpu",
+            use_stable_integrator=False,
+            rng=np.random.default_rng(11),
+        )
+        sim_stable = LQubitCorrelationSimulator(
+            L=L,
+            J=0.1,
+            epsilon=epsilon,
+            N_steps=n_steps,
+            T=T,
+            closed_boundary=True,
+            device="cpu",
+            use_stable_integrator=True,
+            stable_projector_enforce=False,
+            rng=np.random.default_rng(11),
+        )
+
+        G_euler = np.asarray(sim_euler.G_initial, dtype=complex)[None, :, :]
+        G_stable = np.asarray(sim_stable.G_initial, dtype=complex)[None, :, :]
+
+        for _ in range(n_steps):
+            G_euler = sim_euler._hamiltonian_step_batch(G_euler)
+            G_stable = sim_stable._hamiltonian_step_batch(G_stable)
+
+        diff = np.linalg.norm(G_euler[0] - G_stable[0], ord="fro")
+        assert diff < 1e-8

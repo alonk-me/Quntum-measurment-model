@@ -79,7 +79,27 @@ class NumPyBackend(Backend):
     def memory_pool_stats(self) -> dict[str, int]:
         return {"used_bytes": 0, "total_bytes": 0, "workspace_entries": len(self._workspace)}
 
-    def batched_commutator_update(self, G_batch: Any, h: Any, dt: float) -> np.ndarray:
+    def batched_commutator_update(
+        self,
+        G_batch: Any,
+        h: Any,
+        dt: float,
+        *,
+        use_stable_integrator: bool = False,
+        precomputed_u: Any | None = None,
+        warn_on_ignored_stable: bool = False,
+    ) -> np.ndarray:
+        if use_stable_integrator:
+            if precomputed_u is None:
+                raise ValueError("precomputed_u is required when use_stable_integrator=True")
+            if isinstance(precomputed_u, tuple) and len(precomputed_u) == 2:
+                u = np.asarray(precomputed_u[0])
+                u_right = np.asarray(precomputed_u[1])
+            else:
+                u = np.asarray(precomputed_u)
+                u_right = np.conj(np.swapaxes(u, -1, -2))
+            return np.matmul(np.matmul(u, G_batch), u_right)
+
         comm = self.matmul(G_batch, h) - self.matmul(h, G_batch)
         return G_batch + (-2.0j * dt) * comm
 
