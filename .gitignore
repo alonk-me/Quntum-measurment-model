@@ -15,3 +15,4 @@ rust/*
 .github/
 *.out
 *.state
+logs/
