@@ -637,8 +637,9 @@ def _run_single_point_with_config(
 
     if enable_phase_adaptation and not use_stable_integrator:
         raise ValueError("Phase adaptation requires --use-stable-integrator for Stage 1 safety.")
-    if enable_phase_adaptation and nan_mode != "fail_on_nan":
-        raise ValueError("Phase adaptation requires nan_mode='fail_on_nan' for Stage 1 safety.")
+    # Adaptive mode supports both fail-fast and full-sweep NaN policies.
+    # fail_on_nan remains the default for production-quality runs, while
+    # finish_full_sweep is allowed for stability-proving continuation scans.
 
     seed = int(rng.integers(0, np.iinfo(np.int32).max))
     g = gamma / (4 * J_GLOBAL)
@@ -914,8 +915,8 @@ def run_parameter_sweep(
 
     if enable_phase_adaptation and not use_stable_integrator:
         raise ValueError("Phase adaptation requires --use-stable-integrator.")
-    if enable_phase_adaptation and nan_mode != "fail_on_nan":
-        raise ValueError("Phase adaptation requires --nan-mode fail_on_nan.")
+    # Adaptive mode can run with either NaN policy. Operators must choose
+    # explicitly and record mode in launch metadata.
 
     validate_time_grid(
         gamma_grid,
