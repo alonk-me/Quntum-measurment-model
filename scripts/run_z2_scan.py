@@ -85,7 +85,12 @@ CSV_HEADER = [
     "N_steps",
     "epsilon",
     "runtime_sec",
+    "nan_detected",
+    "range_violation",
+    "point_status",
 ]
+
+NAN_MODES = ("fail_on_nan", "finish_full_sweep")
 
 
 # ============================================================================
@@ -116,6 +121,59 @@ def get_time_params(gamma):
     dt = min(tau * DT_RATIO, DT_MAX)
     N_steps = int(round(T / dt))
     return T, dt, N_steps, tau
+
+
+def get_time_params_with_config(gamma, t_multiplier, t_min, dt_ratio, dt_max):
+    """Return (T, dt, N_steps, tau) using explicit runtime parameters."""
+    tau = 1.0 / gamma
+    T = max(tau * float(t_multiplier), float(t_min))
+    dt = min(tau * float(dt_ratio), float(dt_max))
+    N_steps = int(round(T / dt))
+    return T, dt, N_steps, tau
+
+
+def validate_time_grid(gamma_grid, t_multiplier, t_min, dt_ratio, dt_max):
+    """Validate effective time-grid values before launching workers."""
+    dt_vals = []
+    epsilon_vals = []
+    n_steps_vals = []
+    invalid_reasons = []
+
+    for gamma in gamma_grid:
+        T, dt, n_steps, _ = get_time_params_with_config(
+            gamma,
+            t_multiplier=t_multiplier,
+            t_min=t_min,
+            dt_ratio=dt_ratio,
+            dt_max=dt_max,
+        )
+        epsilon = float(np.sqrt(gamma * dt))
+        dt_vals.append(float(dt))
+        epsilon_vals.append(float(epsilon))
+        n_steps_vals.append(int(n_steps))
+
+        if not np.isfinite(dt) or dt <= 0.0 or dt > 1e-2:
+            invalid_reasons.append(f"gamma={gamma}: invalid dt={dt}")
+        if not np.isfinite(epsilon) or epsilon <= 0.0 or epsilon > 0.5:
+            invalid_reasons.append(f"gamma={gamma}: invalid epsilon={epsilon}")
+        if not np.isfinite(T) or T <= 0.0 or n_steps <= 0:
+            invalid_reasons.append(f"gamma={gamma}: invalid T/N_steps (T={T}, N_steps={n_steps})")
+
+    print(
+        "Time-grid preflight: "
+        f"dt in [{min(dt_vals):.3e}, {max(dt_vals):.3e}], "
+        f"epsilon in [{min(epsilon_vals):.3e}, {max(epsilon_vals):.3e}], "
+        f"N_steps in [{min(n_steps_vals)}, {max(n_steps_vals)}]"
+    )
+
+    if invalid_reasons:
+        preview = "; ".join(invalid_reasons[:6])
+        if len(invalid_reasons) > 6:
+            preview += f"; ... and {len(invalid_reasons) - 6} more"
+        raise ValueError(
+            "Time-grid preflight failed. Adjust --t-multiplier/--t-min/--dt-ratio/--dt-max. "
+            + preview
+        )
 
 
 def resolve_L_values():
@@ -173,10 +231,24 @@ def _run_single_point_with_config(
     compute_uncertainty,
     use_stable_integrator=False,
     enable_stability_monitor=False,
+    t_multiplier=T_MULTIPLIER,
+    t_min=T_MIN,
+    dt_ratio=DT_RATIO,
+    dt_max=DT_MAX,
+    nan_mode="fail_on_nan",
 ):
+    if nan_mode not in NAN_MODES:
+        raise ValueError(f"Invalid nan_mode={nan_mode}. Expected one of {NAN_MODES}.")
+
     seed = int(rng.integers(0, np.iinfo(np.int32).max))
     g = gamma / (4 * J_GLOBAL)
-    T, dt, N_steps, tau = get_time_params(gamma)
+    T, dt, N_steps, tau = get_time_params_with_config(
+        gamma,
+        t_multiplier=t_multiplier,
+        t_min=t_min,
+        dt_ratio=dt_ratio,
+        dt_max=dt_max,
+    )
     epsilon = float(np.sqrt(gamma * dt))
     if not np.isfinite(dt) or dt <= 0.0 or dt > 1e-2:
         raise ValueError(f"Invalid dt={dt} for L={L}, gamma={gamma}")
@@ -216,6 +288,21 @@ def _run_single_point_with_config(
         z2_stderr = float("nan")
 
     z2_plus_one = 1.0 + z2_mean
+    nan_detected = not np.isfinite(z2_mean)
+    range_violation = bool(
+        np.isfinite(z2_mean) and ((z2_mean < -1e-9) or (z2_mean > (1.0 + 1e-6)))
+    )
+    if nan_detected:
+        point_status = "nan"
+    elif range_violation:
+        point_status = "range_violation"
+    else:
+        point_status = "ok"
+    if nan_detected and nan_mode == "fail_on_nan":
+        raise ValueError(
+            f"NaN detected for point L={L}, gamma={gamma}, seed={seed}, mode={nan_mode}."
+        )
+
     runtime = time.time() - start_time
 
     return {
@@ -235,6 +322,9 @@ def _run_single_point_with_config(
         "N_steps": int(N_steps),
         "epsilon": epsilon,
         "runtime_sec": float(runtime),
+        "nan_detected": bool(nan_detected),
+        "range_violation": bool(range_violation),
+        "point_status": point_status,
     }
 
 
@@ -244,6 +334,11 @@ def _build_point_runner(
     compute_uncertainty,
     use_stable_integrator=False,
     enable_stability_monitor=False,
+    t_multiplier=T_MULTIPLIER,
+    t_min=T_MIN,
+    dt_ratio=DT_RATIO,
+    dt_max=DT_MAX,
+    nan_mode="fail_on_nan",
 ):
     return functools.partial(
         _run_single_point_with_config,
@@ -252,6 +347,11 @@ def _build_point_runner(
         compute_uncertainty=compute_uncertainty,
         use_stable_integrator=use_stable_integrator,
         enable_stability_monitor=enable_stability_monitor,
+        t_multiplier=t_multiplier,
+        t_min=t_min,
+        dt_ratio=dt_ratio,
+        dt_max=dt_max,
+        nan_mode=nan_mode,
     )
 
 
@@ -270,7 +370,16 @@ def run_parameter_sweep(
     compute_uncertainty=False,
     use_stable_integrator=False,
     enable_stability_monitor=False,
+    t_multiplier=T_MULTIPLIER,
+    t_min=T_MIN,
+    dt_ratio=DT_RATIO,
+    dt_max=DT_MAX,
+    nan_mode="fail_on_nan",
+    event_log_path=None,
 ):
+    if nan_mode not in NAN_MODES:
+        raise ValueError(f"Invalid nan_mode={nan_mode}. Expected one of {NAN_MODES}.")
+
     print("=" * 80)
     print("1+<z^2> PARAMETER SWEEP")
     print("=" * 80)
@@ -297,6 +406,21 @@ def run_parameter_sweep(
     print(f"  compute uncertainty: {bool(compute_uncertainty)}")
     print(f"  use stable integrator: {bool(use_stable_integrator)}")
     print(f"  enable stability monitor: {bool(enable_stability_monitor)}")
+    print(f"  nan mode: {nan_mode}")
+    print(
+        "  time-grid: "
+        f"t_multiplier={float(t_multiplier):.6g}, "
+        f"t_min={float(t_min):.6g}, "
+        f"dt_ratio={float(dt_ratio):.6g}, "
+        f"dt_max={float(dt_max):.6g}"
+    )
+    validate_time_grid(
+        gamma_grid,
+        t_multiplier=t_multiplier,
+        t_min=t_min,
+        dt_ratio=dt_ratio,
+        dt_max=dt_max,
+    )
     print()
 
     if resume and csv_file.exists():
@@ -305,12 +429,20 @@ def run_parameter_sweep(
         print()
 
     if executor_kind == "multi_cpu":
+        effective_event_log = (
+            Path(event_log_path)
+            if event_log_path is not None
+            else csv_file.with_name(f"{csv_file.stem}_events.jsonl")
+        )
         cfg = MultiCpuBackendConfig(
             max_workers=(n_workers if n_workers is not None else 38),
             master_seed=base_seed,
+            nan_mode=nan_mode,
+            log_path=effective_event_log,
         )
         executor = MultiCpuBackend(config=cfg)
         print(f"Executor: multi_cpu (workers={cfg.max_workers}, reserve_cores={cfg.reserve_cores})")
+        print(f"Event log: {effective_event_log}")
     else:
         executor = ParameterSweepExecutor(
             parallel_backend=parallel_backend,
@@ -327,23 +459,42 @@ def run_parameter_sweep(
         compute_uncertainty=compute_uncertainty,
         use_stable_integrator=use_stable_integrator,
         enable_stability_monitor=enable_stability_monitor,
+        t_multiplier=t_multiplier,
+        t_min=t_min,
+        dt_ratio=dt_ratio,
+        dt_max=dt_max,
+        nan_mode=nan_mode,
     )
 
-    _ = executor.run_sweep(
-        L_values=L_values,
-        gamma_grid=gamma_grid,
-        simulator_factory=point_runner,
-        backend_device=backend_device,
-        output_csv=csv_file,
-        resume=resume,
-        csv_header=CSV_HEADER,
-    )
+    try:
+        _ = executor.run_sweep(
+            L_values=L_values,
+            gamma_grid=gamma_grid,
+            simulator_factory=point_runner,
+            backend_device=backend_device,
+            output_csv=csv_file,
+            resume=resume,
+            csv_header=CSV_HEADER,
+        )
+    except Exception as exc:
+        print("=" * 80)
+        print("SWEEP FAILED")
+        print("=" * 80)
+        print(f"Failure type: {type(exc).__name__}")
+        print(f"Failure detail: {exc}")
+        print(f"CSV target: {csv_file}")
+        if executor_kind == "multi_cpu":
+            print(f"Event log: {cfg.log_path}")
+            print(f"Event counts: {executor.overflow_logger.counts()}")
+        raise
 
     print("=" * 80)
     print("PARAMETER SWEEP COMPLETE")
     print("=" * 80)
     print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Results saved to: {csv_file}")
+    if executor_kind == "multi_cpu":
+        print(f"Event counts: {executor.overflow_logger.counts()}")
     print()
 
 
@@ -483,8 +634,27 @@ def main():
     parser.add_argument("--use-stable-integrator", action="store_true")
     parser.add_argument("--enable-stability-monitor", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
+    parser.add_argument("--t-multiplier", type=float, default=T_MULTIPLIER)
+    parser.add_argument("--t-min", type=float, default=T_MIN)
+    parser.add_argument("--dt-ratio", type=float, default=DT_RATIO)
+    parser.add_argument("--dt-max", type=float, default=DT_MAX)
+    parser.add_argument(
+        "--event-log",
+        type=str,
+        default=None,
+        help="Path to JSONL event log for multi_cpu executor (default: <csv_stem>_events.jsonl).",
+    )
+    parser.add_argument(
+        "--nan-mode",
+        choices=NAN_MODES,
+        default="fail_on_nan",
+        help="NaN policy: fail on first NaN point or finish full sweep with NaNs flagged.",
+    )
 
     args = parser.parse_args()
+    if args.t_multiplier <= 0 or args.t_min <= 0 or args.dt_ratio <= 0 or args.dt_max <= 0:
+        raise ValueError("Time-grid overrides must be positive: --t-multiplier, --t-min, --dt-ratio, --dt-max")
+
     csv_file = Path(args.csv) if args.csv else DEFAULT_CSV
 
     run_parameter_sweep(
@@ -502,6 +672,12 @@ def main():
         compute_uncertainty=args.compute_uncertainty,
         use_stable_integrator=args.use_stable_integrator,
         enable_stability_monitor=args.enable_stability_monitor,
+        t_multiplier=args.t_multiplier,
+        t_min=args.t_min,
+        dt_ratio=args.dt_ratio,
+        dt_max=args.dt_max,
+        nan_mode=args.nan_mode,
+        event_log_path=args.event_log,
     )
     if not args.skip_plots:
         generate_verification_plots(csv_file)

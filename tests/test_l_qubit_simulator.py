@@ -30,6 +30,8 @@ def validate_stable_evolution(gamma: float, L: int = 16) -> Dict[str, float]:
         closed_boundary=True,
         device="cpu",
         use_stable_integrator=True,
+        stable_projector_enforce=True,
+        bdg_enforce_threshold=0.0,
         enable_stability_monitor=True,
         rng=np.random.default_rng(1234),
     )

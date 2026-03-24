@@ -109,6 +109,11 @@ class LQubitCorrelationSimulator:
         If ``True`` the chain has periodic (closed) boundary conditions
         and the last site is coupled back to the first.  If ``False``
         the chain is open.
+    stable_projector_enforce : bool, optional
+        If ``True``, snap the spectrum of ``G`` to ``{0,1}`` after each
+        stable step. This is a legacy guard intended for explicit Euler
+        drift repair. It should not be used with the stable integrator,
+        where interior eigenvalue dynamics are physical signal.
     rng : numpy.random.Generator or None, optional
         Random number generator used for sampling measurement outcomes.
         When ``None`` a new default RNG is constructed.
@@ -123,7 +128,7 @@ class LQubitCorrelationSimulator:
     device: str = "cpu"
     use_stable_integrator: bool = False
     enable_stability_monitor: bool = False
-    stable_projector_enforce: bool = True
+    stable_projector_enforce: bool = False
     bdg_enforce_threshold: float | None = None
     backend: Backend | None = field(default=None, repr=False)
     rng: Optional[np.random.Generator] = field(default=None, repr=False)
@@ -170,6 +175,12 @@ class LQubitCorrelationSimulator:
             warnings.warn(
                 "Stable integrator is currently CPU-only; falling back to Euler path on GPU backend.",
                 RuntimeWarning,
+            )
+        if self.use_stable_integrator and self.stable_projector_enforce:
+            warnings.warn(
+                "projector snap is incompatible with stable integrator - interior eigenvalue dynamics will be erased. "
+                "Set stable_projector_enforce=False or use Euler path.",
+                UserWarning,
             )
         self._stable_mode_active = bool(self.use_stable_integrator and (not self.backend.is_gpu))
         if self._stable_mode_active:
@@ -291,6 +302,18 @@ class LQubitCorrelationSimulator:
     def _enforce_hermiticity_batch(self, G_batch: Any) -> Any:
         return 0.5 * (G_batch + self.backend.conj(np.swapaxes(G_batch, -1, -2)))
 
+    def _clip_diag_probabilities(self, G: Any) -> Any:
+        """Clip diagonal occupations into [0, 1] without projector snapping."""
+        diag = self.backend.real(self.backend.diag(G))
+        diag_clipped = self.backend.asnumpy(self.backend.clip(diag, 0.0, 1.0))
+        for i in range(2 * self.L):
+            G[i, i] = float(diag_clipped[i]) + 0.0j
+        return G
+
+    def _clip_diag_probabilities_batch(self, G_batch: Any) -> Any:
+        """Batch diagonal clipping counterpart for stable path updates."""
+        return self.backend.symmetrize_clip_diag_inplace(G_batch)
+
     def _enforce_projector(self, G: Any) -> Any:
         g_np = np.asarray(self.backend.asnumpy(G), dtype=complex)
         g_herm = 0.5 * (g_np + g_np.conj().T)
@@ -374,6 +397,8 @@ class LQubitCorrelationSimulator:
     def _maybe_enforce_bdg(self, G: Any) -> Any:
         threshold = self.bdg_enforce_threshold
         if threshold is None:
+            return G
+        if float(threshold) <= 0.0:
             return self._enforce_bdg(G)
         if self._bdg_residual_fro(G) > float(threshold):
             return self._enforce_bdg(G)
@@ -382,6 +407,8 @@ class LQubitCorrelationSimulator:
     def _maybe_enforce_bdg_batch(self, G_batch: Any) -> Any:
         threshold = self.bdg_enforce_threshold
         if threshold is None:
+            return G_batch
+        if float(threshold) <= 0.0:
             return self._enforce_bdg_batch(G_batch)
 
         residuals = self._bdg_residual_fro_batch(G_batch)
@@ -534,6 +561,7 @@ class LQubitCorrelationSimulator:
         G, xi = self._measurement_step(G, apply_projection=False)
         G = self._maybe_enforce_bdg(G)
         G = self._enforce_hermiticity(G)
+        G = self._clip_diag_probabilities(G)
         if self.stable_projector_enforce:
             G = self._enforce_projector(G)
             G = self._enforce_hermiticity(G)
@@ -545,6 +573,7 @@ class LQubitCorrelationSimulator:
         G_batch = self._measurement_step_batch(G_batch, xi_step, apply_projection=False)
         G_batch = self._maybe_enforce_bdg_batch(G_batch)
         G_batch = self._enforce_hermiticity_batch(G_batch)
+        G_batch = self._clip_diag_probabilities_batch(G_batch)
         if self.stable_projector_enforce:
             G_batch = self._enforce_projector_batch(G_batch)
             G_batch = self._enforce_hermiticity_batch(G_batch)

@@ -24,6 +24,9 @@ import pandas as pd
 RESULTS_DIR = Path(__file__).parent.parent / "results" / "z2_scan"
 REFRESH_INTERVAL = 30
 PLOT_FILE = RESULTS_DIR / "live_progress.png"
+FIRST_CHECKPOINT_SLA_MIN = 45
+STALL_ALERT_MIN = 45
+NAN_ALERT_RATIO = 0.05
 
 plt.rcParams["figure.dpi"] = 150
 plt.rcParams["font.size"] = 9
@@ -48,6 +51,8 @@ def load_csv_safe(csv_file):
 
 
 def format_time_delta(seconds):
+    if seconds is None:
+        return "n/a"
     if seconds < 60:
         return f"{seconds:.0f}s"
     if seconds < 3600:
@@ -55,11 +60,20 @@ def format_time_delta(seconds):
     return f"{seconds/3600:.1f}hr"
 
 
+def _age_seconds_from_timestamps(series):
+    parsed = pd.to_datetime(series, errors="coerce")
+    if parsed.notna().sum() == 0:
+        return None
+    latest = parsed.max()
+    age = (pd.Timestamp.now() - latest).total_seconds()
+    return max(float(age), 0.0)
+
+
 # ============================================================================
 # Plotting
 # ============================================================================
 
-def generate_progress_plot(df, csv_file):
+def generate_progress_plot(df, csv_file, health=None):
     if df is None or len(df) == 0:
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.text(0.5, 0.5, "Waiting for data...", ha="center", va="center", fontsize=16)
@@ -108,12 +122,32 @@ def generate_progress_plot(df, csv_file):
     ax3 = fig.add_subplot(gs[1, 1])
     ax3.axis("off")
 
-    latest = df.iloc[-1]
+    df_time = df.sort_values("timestamp")
+    latest = df_time.iloc[-1]
+
+    csv_age_sec = None
+    try:
+        csv_age_sec = max(0.0, time.time() - csv_file.stat().st_mtime)
+    except Exception:
+        csv_age_sec = None
+
+    z2_numeric = pd.to_numeric(df["z2_mean"], errors="coerce")
+    finite_mask = np.isfinite(z2_numeric.values)
+    nan_count = int(np.sum(~finite_mask))
+    nan_ratio = float(nan_count / len(df)) if len(df) > 0 else 0.0
+    last_row_age = _age_seconds_from_timestamps(df["timestamp"])
+    last_finite_age = _age_seconds_from_timestamps(df.loc[finite_mask, "timestamp"]) if np.any(finite_mask) else None
+
+    health_state = "OK"
+    if health is not None and isinstance(health, dict):
+        health_state = str(health.get("state", "OK"))
+
     status_text = f"""
 LIVE STATUS
 {'='*22}
 File: {csv_file.name}
 Points: {len(df)}
+Health: {health_state}
 
 Latest Point:
   Time: {latest['timestamp']}
@@ -121,6 +155,12 @@ Latest Point:
   gamma: {latest['gamma']:.4f}
   g: {latest['g']:.4f}
   1+z2: {latest['z2_plus_one']:.6f}
+
+Data Health:
+    NaN rows: {nan_count} ({nan_ratio*100:.1f}%)
+    Last finite row age: {format_time_delta(last_finite_age)}
+    Last row age: {format_time_delta(last_row_age)}
+    CSV mtime age: {format_time_delta(csv_age_sec)}
 
 Runtime:
   Total: {format_time_delta(df['runtime_sec'].sum())}
@@ -152,13 +192,22 @@ Runtime:
 # Monitor loop
 # ============================================================================
 
-def monitor_loop(csv_file=None, interval=REFRESH_INTERVAL):
+def monitor_loop(
+    csv_file=None,
+    interval=REFRESH_INTERVAL,
+    first_checkpoint_sla_min=FIRST_CHECKPOINT_SLA_MIN,
+    stall_alert_min=STALL_ALERT_MIN,
+    nan_alert_ratio=NAN_ALERT_RATIO,
+):
     print("=" * 80)
     print("LIVE PROGRESS MONITOR FOR 1+<z^2> SWEEP")
     print("=" * 80)
     print(f"Results directory: {RESULTS_DIR}")
     print(f"Refresh interval: {interval}s")
     print(f"Output plot: {PLOT_FILE}")
+    print(f"First checkpoint SLA: {first_checkpoint_sla_min} min")
+    print(f"Stall alert threshold: {stall_alert_min} min")
+    print(f"NaN alert ratio threshold: {nan_alert_ratio:.1%}")
     print()
 
     if csv_file is None:
@@ -171,6 +220,7 @@ def monitor_loop(csv_file=None, interval=REFRESH_INTERVAL):
 
     iteration = 0
     last_n_points = 0
+    monitor_start = time.time()
 
     try:
         while True:
@@ -196,17 +246,62 @@ def monitor_loop(csv_file=None, interval=REFRESH_INTERVAL):
                 time.sleep(5)
                 continue
 
+            if len(df) == 0:
+                waited = time.time() - monitor_start
+                over_sla = waited > float(first_checkpoint_sla_min) * 60.0
+                health = {"state": "FIRST_CHECKPOINT_LATE" if over_sla else "WAITING_FIRST_CHECKPOINT"}
+                generate_progress_plot(df, current_csv, health=health)
+                symbol = "⚠" if over_sla else "⏸"
+                print(
+                    f"[{timestamp}] {symbol} Iteration {iteration}: 0 total points (+0 new), "
+                    f"waiting for first checkpoint ({format_time_delta(waited)})"
+                )
+                time.sleep(interval)
+                continue
+
             n_points = len(df)
             new_points = n_points - last_n_points
 
-            generate_progress_plot(df, current_csv)
+            z2_numeric = pd.to_numeric(df["z2_mean"], errors="coerce")
+            finite_mask = np.isfinite(z2_numeric.values)
+            nan_count = int(np.sum(~finite_mask))
+            nan_ratio = float(nan_count / n_points) if n_points > 0 else 0.0
 
-            status_symbol = "⟳" if new_points > 0 else "⏸"
-            latest = df.iloc[-1]
+            last_row_age = _age_seconds_from_timestamps(df["timestamp"])
+            stalled = bool(
+                new_points <= 0
+                and last_row_age is not None
+                and last_row_age > float(stall_alert_min) * 60.0
+            )
+            nan_alert = bool(nan_count > 0 and nan_ratio >= float(nan_alert_ratio))
+
+            state = "OK"
+            if stalled and nan_alert:
+                state = "STALL_AND_NAN_ALERT"
+            elif stalled:
+                state = "STALL_ALERT"
+            elif nan_alert:
+                state = "NAN_ALERT"
+
+            health = {
+                "state": state,
+                "nan_count": nan_count,
+                "nan_ratio": nan_ratio,
+                "last_row_age": last_row_age,
+            }
+
+            generate_progress_plot(df, current_csv, health=health)
+
+            if state != "OK":
+                status_symbol = "⚠"
+            else:
+                status_symbol = "⟳" if new_points > 0 else "⏸"
+            latest = df.sort_values("timestamp").iloc[-1]
             print(
                 f"[{timestamp}] {status_symbol} Iteration {iteration}: "
                 f"{n_points} total points (+{new_points} new), "
-                f"latest: L={int(latest['L'])} gamma={latest['gamma']:.3f}"
+                f"latest: L={int(latest['L'])} gamma={latest['gamma']:.3f}, "
+                f"nan={nan_count}/{n_points} ({nan_ratio*100:.1f}%), state={state}"
             )
 
             last_n_points = n_points
@@ -238,9 +333,33 @@ def main():
         default=REFRESH_INTERVAL,
         help=f"Refresh interval in seconds (default: {REFRESH_INTERVAL})",
     )
+    parser.add_argument(
+        "--first-checkpoint-sla-min",
+        type=float,
+        default=FIRST_CHECKPOINT_SLA_MIN,
+        help=f"Minutes before warning if no first CSV row appears (default: {FIRST_CHECKPOINT_SLA_MIN})",
+    )
+    parser.add_argument(
+        "--stall-alert-min",
+        type=float,
+        default=STALL_ALERT_MIN,
+        help=f"Minutes since last new row before stall warning (default: {STALL_ALERT_MIN})",
+    )
+    parser.add_argument(
+        "--nan-alert-ratio",
+        type=float,
+        default=NAN_ALERT_RATIO,
+        help=f"Warn when NaN row ratio reaches this value (default: {NAN_ALERT_RATIO})",
+    )
 
     args = parser.parse_args()
-    monitor_loop(csv_file=args.csv, interval=args.interval)
+    monitor_loop(
+        csv_file=args.csv,
+        interval=args.interval,
+        first_checkpoint_sla_min=args.first_checkpoint_sla_min,
+        stall_alert_min=args.stall_alert_min,
+        nan_alert_ratio=args.nan_alert_ratio,
+    )
 
 
 if __name__ == "__main__":
