@@ -16,10 +16,13 @@ Usage:
 import argparse
 import csv
 import functools
+import hashlib
+import json
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Tuple, Union
 
 import matplotlib
 matplotlib.use("Agg")
@@ -56,6 +59,42 @@ T_MIN = 100.0  # Increased from 10 for better convergence
 DT_RATIO = 5e-3
 DT_MAX = 1e-3
 N_STEPS_WARNING = 1e8
+DT_ABSOLUTE_MAX = 1e-2
+DT_MIN = 1e-6
+N_STEPS_MIN = 5_000
+N_STEPS_MAX = 500_000
+
+PHASE_CRITICAL_G_MIN = 0.9
+PHASE_CRITICAL_G_MAX = 1.1
+PHASE_STEPS_MULT_BEFORE = 0.75
+PHASE_STEPS_MULT_CRITICAL = 1.30
+PHASE_STEPS_MULT_AFTER = 0.60
+PHASE_TIME_MULT_BEFORE = 1.00
+PHASE_TIME_MULT_CRITICAL = 1.10
+PHASE_TIME_MULT_AFTER = 0.85
+NONCRITICAL_MAX_STEP_RATIO = 1.00
+CRITICAL_MAX_STEP_RATIO = 1.15
+ADAPTIVE_PROFILE_LEGACY = "legacy"
+ADAPTIVE_PROFILE_NEXT_PASS_V1 = "next_pass_v1"
+ADAPTIVE_PROFILE_OVERRIDES = {
+    ADAPTIVE_PROFILE_NEXT_PASS_V1: {
+        "t_multiplier": 0.95,
+        "t_min": 4.0,
+        "n_steps_min": 3_500,
+        "phase_steps_mult_before": 0.70,
+        "phase_steps_mult_critical": 1.12,
+        "phase_steps_mult_after": 0.60,
+        "phase_time_mult_before": 0.82,
+        "phase_time_mult_critical": 1.00,
+        "phase_time_mult_after": 0.82,
+        "noncritical_max_step_ratio": 0.90,
+        "critical_max_step_ratio": 1.08,
+    },
+}
+RUN_META_VERSION = 1
+PHASE_MAP_VERSION = 1
+PHASE_MAP_SLOPE_THRESHOLD = 0.35
+PHASE_MAP_MIN_POINTS = 9
 
 # L values (existing list capped at 128, no fallback)
 L_VALUES_BASE = [9, 17, 33, 65, 129, 256]
@@ -116,23 +155,298 @@ def construct_gamma_grid():
 
 def get_time_params(gamma):
     """Return (T, dt, N_steps, tau) based on gamma."""
-    tau = 1.0 / gamma
-    T = max(tau * T_MULTIPLIER, T_MIN)
-    dt = min(tau * DT_RATIO, DT_MAX)
-    N_steps = int(round(T / dt))
-    return T, dt, N_steps, tau
+    return get_time_params_with_config(
+        gamma,
+        t_multiplier=T_MULTIPLIER,
+        t_min=T_MIN,
+        dt_ratio=DT_RATIO,
+        dt_max=DT_MAX,
+    )
 
 
-def get_time_params_with_config(gamma, t_multiplier, t_min, dt_ratio, dt_max):
-    """Return (T, dt, N_steps, tau) using explicit runtime parameters."""
-    tau = 1.0 / gamma
+def classify_phase_region(gamma, critical_g_min=PHASE_CRITICAL_G_MIN, critical_g_max=PHASE_CRITICAL_G_MAX):
+    """Classify point location relative to transition using g=gamma/(4J)."""
+    g = float(gamma) / (4.0 * J_GLOBAL)
+    if g < float(critical_g_min):
+        return "before"
+    if g > float(critical_g_max):
+        return "after"
+    return "critical"
+
+
+def _phase_map_fingerprint(phase_map: Optional[dict]) -> Optional[str]:
+    if phase_map is None:
+        return None
+    payload = json.dumps(phase_map, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def load_phase_map_artifact(phase_map_file: Union[Path, str]) -> dict:
+    """Load and validate static phase-map artifact used for two-pass scheduling."""
+    path = Path(phase_map_file)
+    with open(path, "r", encoding="utf-8") as f:
+        phase_map = json.load(f)
+
+    required = {"phase_map_version", "critical_g_min", "critical_g_max", "method"}
+    missing = sorted(required - set(phase_map.keys()))
+    if missing:
+        raise ValueError(f"Invalid phase-map artifact {path}: missing fields {missing}")
+
+    cmin = float(phase_map["critical_g_min"])
+    cmax = float(phase_map["critical_g_max"])
+    if not np.isfinite(cmin) or not np.isfinite(cmax) or cmin <= 0.0 or cmax <= cmin:
+        raise ValueError(
+            f"Invalid phase-map critical bounds in {path}: critical_g_min={cmin}, critical_g_max={cmax}"
+        )
+
+    return phase_map
+
+
+def _derive_phase_bounds_from_df(df: pd.DataFrame, slope_threshold_rel: float, min_points: int) -> Tuple[float, float, dict]:
+    """Derive critical window from calibration data using |d(1+<z^2>)/dlog10(g)|."""
+    if "g" not in df.columns or "z2_plus_one" not in df.columns:
+        raise ValueError("Phase-map derivation requires columns: g, z2_plus_one")
+
+    work = df[["g", "z2_plus_one"]].copy()
+    work = work[np.isfinite(work["g"]) & np.isfinite(work["z2_plus_one"]) & (work["g"] > 0)]
+    if len(work) < int(min_points):
+        raise ValueError(
+            f"Insufficient finite rows for phase-map derivation: {len(work)} < {int(min_points)}"
+        )
+
+    agg = work.groupby("g", as_index=False)["z2_plus_one"].median().sort_values("g")
+    if len(agg) < int(min_points):
+        raise ValueError(
+            f"Insufficient unique g points for phase-map derivation: {len(agg)} < {int(min_points)}"
+        )
+
+    log_g = np.log10(agg["g"].to_numpy(dtype=float))
+    z = agg["z2_plus_one"].to_numpy(dtype=float)
+    slope = np.gradient(z, log_g)
+    slope_abs = np.abs(slope)
+    peak = float(np.max(slope_abs))
+    if not np.isfinite(peak) or peak <= 0.0:
+        raise ValueError("Unable to derive critical window: non-finite or zero slope peak")
+
+    threshold = float(slope_threshold_rel) * peak
+    mask = slope_abs >= threshold
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        raise ValueError("Unable to derive critical window: empty slope mask")
+
+    lo = max(0, int(idx[0]) - 1)
+    hi = min(len(agg) - 1, int(idx[-1]) + 1)
+    g_vals = agg["g"].to_numpy(dtype=float)
+    critical_min = float(g_vals[lo])
+    critical_max = float(g_vals[hi])
+    if critical_max <= critical_min:
+        center = float(g_vals[int(idx[0])])
+        critical_min = 0.9 * center
+        critical_max = 1.1 * center
+
+    diagnostics = {
+        "n_rows_used": int(len(work)),
+        "n_unique_g": int(len(agg)),
+        "slope_peak_abs": float(peak),
+        "slope_threshold_abs": float(threshold),
+    }
+    return critical_min, critical_max, diagnostics
+
+
+def build_phase_map_artifact(
+    calibration_csv: Union[Path, str],
+    output_path: Union[Path, str],
+    *,
+    slope_threshold_rel: float = PHASE_MAP_SLOPE_THRESHOLD,
+    min_points: int = PHASE_MAP_MIN_POINTS,
+) -> Path:
+    """Build and persist phase-map artifact from calibration CSV (pass 1)."""
+    source = Path(calibration_csv)
+    out = Path(output_path)
+    if not source.exists():
+        raise FileNotFoundError(f"Calibration CSV not found: {source}")
+    if not (0.0 < float(slope_threshold_rel) <= 1.0):
+        raise ValueError("slope_threshold_rel must be in (0, 1]")
+    if int(min_points) < 5:
+        raise ValueError("min_points must be >= 5")
+
+    df = pd.read_csv(source)
+    critical_g_min, critical_g_max, diagnostics = _derive_phase_bounds_from_df(
+        df,
+        slope_threshold_rel=float(slope_threshold_rel),
+        min_points=int(min_points),
+    )
+
+    artifact = {
+        "phase_map_version": PHASE_MAP_VERSION,
+        "created_at": datetime.now().isoformat(),
+        "method": "median-z2-slope-on-log-g",
+        "source_csv": str(source),
+        "critical_g_min": float(critical_g_min),
+        "critical_g_max": float(critical_g_max),
+        "derivation": {
+            "slope_threshold_rel": float(slope_threshold_rel),
+            "min_points": int(min_points),
+        },
+        "diagnostics": diagnostics,
+    }
+    artifact["fingerprint"] = _phase_map_fingerprint(artifact)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(artifact, f, indent=2, sort_keys=True)
+    return out
+
+
+def _baseline_time_schedule(gamma, t_multiplier, t_min, dt_ratio, dt_max):
+    tau = 1.0 / float(gamma)
     T = max(tau * float(t_multiplier), float(t_min))
     dt = min(tau * float(dt_ratio), float(dt_max))
-    N_steps = int(round(T / dt))
+    N_steps = int(np.ceil(T / dt))
     return T, dt, N_steps, tau
 
 
-def validate_time_grid(gamma_grid, t_multiplier, t_min, dt_ratio, dt_max):
+def build_time_schedule(
+    gamma,
+    t_multiplier,
+    t_min,
+    dt_ratio,
+    dt_max,
+    *,
+    enable_phase_adaptation=False,
+    phase_critical_g_min=PHASE_CRITICAL_G_MIN,
+    phase_critical_g_max=PHASE_CRITICAL_G_MAX,
+    phase_steps_mult_before=PHASE_STEPS_MULT_BEFORE,
+    phase_steps_mult_critical=PHASE_STEPS_MULT_CRITICAL,
+    phase_steps_mult_after=PHASE_STEPS_MULT_AFTER,
+    phase_time_mult_before=PHASE_TIME_MULT_BEFORE,
+    phase_time_mult_critical=PHASE_TIME_MULT_CRITICAL,
+    phase_time_mult_after=PHASE_TIME_MULT_AFTER,
+    noncritical_max_step_ratio=NONCRITICAL_MAX_STEP_RATIO,
+    critical_max_step_ratio=CRITICAL_MAX_STEP_RATIO,
+    n_steps_min=N_STEPS_MIN,
+    n_steps_max=N_STEPS_MAX,
+    dt_min=DT_MIN,
+    phase_map=None,
+):
+    """Build deterministic time schedule with optional phase-aware bounded step budget."""
+    if float(dt_max) > DT_ABSOLUTE_MAX:
+        raise ValueError(f"dt_max={dt_max} exceeds absolute bound {DT_ABSOLUTE_MAX}")
+    if int(n_steps_min) <= 0 or int(n_steps_max) <= 0 or int(n_steps_min) > int(n_steps_max):
+        raise ValueError("Require 0 < n_steps_min <= n_steps_max")
+
+    T_base, dt_base, N_base, tau = _baseline_time_schedule(
+        gamma,
+        t_multiplier=t_multiplier,
+        t_min=t_min,
+        dt_ratio=dt_ratio,
+        dt_max=dt_max,
+    )
+    if phase_map is not None:
+        phase_critical_g_min = float(phase_map["critical_g_min"])
+        phase_critical_g_max = float(phase_map["critical_g_max"])
+
+    phase_label = classify_phase_region(
+        gamma,
+        critical_g_min=phase_critical_g_min,
+        critical_g_max=phase_critical_g_max,
+    )
+
+    if not enable_phase_adaptation:
+        return {
+            "T": float(T_base),
+            "dt": float(dt_base),
+            "N_steps": int(N_base),
+            "tau": float(tau),
+            "phase_label": phase_label,
+            "adaptive_schedule": False,
+            "phase_source": "phase_map" if phase_map is not None else "inline",
+        }
+
+    steps_mult = {
+        "before": float(phase_steps_mult_before),
+        "critical": float(phase_steps_mult_critical),
+        "after": float(phase_steps_mult_after),
+    }[phase_label]
+    time_mult = {
+        "before": float(phase_time_mult_before),
+        "critical": float(phase_time_mult_critical),
+        "after": float(phase_time_mult_after),
+    }[phase_label]
+
+    # Keep epsilon <= 0.5 by limiting dt based on gamma.
+    epsilon_dt_cap = ((0.5 - 1e-12) ** 2) / float(gamma)
+    dt_upper = min(float(dt_max), float(epsilon_dt_cap), DT_ABSOLUTE_MAX)
+    if not np.isfinite(dt_upper) or dt_upper <= 0.0:
+        raise ValueError(f"No feasible dt upper bound for gamma={gamma}: dt_upper={dt_upper}")
+
+    T_target = max(float(T_base) * time_mult, float(dt_min) * int(n_steps_min))
+    # Hard cap horizon so dt_max and n_steps_max are always jointly feasible.
+    T_target = min(T_target, dt_upper * int(n_steps_max))
+
+    n_target = int(np.ceil(float(N_base) * steps_mult))
+    if phase_label == "critical":
+        phase_step_cap = int(np.ceil(float(N_base) * float(critical_max_step_ratio)))
+    else:
+        phase_step_cap = int(np.ceil(float(N_base) * float(noncritical_max_step_ratio)))
+    phase_step_cap = int(np.clip(phase_step_cap, int(n_steps_min), int(n_steps_max)))
+    n_target = min(n_target, phase_step_cap)
+    n_target = int(np.clip(n_target, int(n_steps_min), int(n_steps_max)))
+
+    dt = float(T_target / n_target)
+    dt = float(np.clip(dt, float(dt_min), dt_upper))
+    N_steps = int(np.ceil(T_target / dt))
+
+    if N_steps > phase_step_cap:
+        N_steps = int(phase_step_cap)
+        dt = float(np.clip(T_target / N_steps, float(dt_min), dt_upper))
+        T_target = float(dt * N_steps)
+
+    if N_steps > int(n_steps_max):
+        N_steps = int(n_steps_max)
+        dt = float(T_target / N_steps)
+
+    if dt > dt_upper:
+        dt = float(dt_upper)
+        T_target = float(dt * N_steps)
+
+    if N_steps < int(n_steps_min):
+        N_steps = int(n_steps_min)
+        dt = float(np.clip(T_target / N_steps, float(dt_min), dt_upper))
+        T_target = float(dt * N_steps)
+
+    return {
+        "T": float(T_target),
+        "dt": float(dt),
+        "N_steps": int(N_steps),
+        "tau": float(tau),
+        "phase_label": phase_label,
+        "adaptive_schedule": True,
+        "phase_source": "phase_map" if phase_map is not None else "inline",
+    }
+
+
+def get_time_params_with_config(
+    gamma,
+    t_multiplier,
+    t_min,
+    dt_ratio,
+    dt_max,
+    **schedule_kwargs,
+):
+    """Return (T, dt, N_steps, tau) using explicit runtime parameters."""
+    sched = build_time_schedule(
+        gamma,
+        t_multiplier=t_multiplier,
+        t_min=t_min,
+        dt_ratio=dt_ratio,
+        dt_max=dt_max,
+        **schedule_kwargs,
+    )
+    return sched["T"], sched["dt"], sched["N_steps"], sched["tau"]
+
+
+def validate_time_grid(gamma_grid, t_multiplier, t_min, dt_ratio, dt_max, **schedule_kwargs):
     """Validate effective time-grid values before launching workers."""
     dt_vals = []
     epsilon_vals = []
@@ -140,24 +454,30 @@ def validate_time_grid(gamma_grid, t_multiplier, t_min, dt_ratio, dt_max):
     invalid_reasons = []
 
     for gamma in gamma_grid:
-        T, dt, n_steps, _ = get_time_params_with_config(
+        sched = build_time_schedule(
             gamma,
             t_multiplier=t_multiplier,
             t_min=t_min,
             dt_ratio=dt_ratio,
             dt_max=dt_max,
+            **schedule_kwargs,
         )
+        T = float(sched["T"])
+        dt = float(sched["dt"])
+        n_steps = int(sched["N_steps"])
         epsilon = float(np.sqrt(gamma * dt))
         dt_vals.append(float(dt))
         epsilon_vals.append(float(epsilon))
         n_steps_vals.append(int(n_steps))
 
-        if not np.isfinite(dt) or dt <= 0.0 or dt > 1e-2:
+        if not np.isfinite(dt) or dt <= 0.0 or dt > min(float(dt_max), DT_ABSOLUTE_MAX):
             invalid_reasons.append(f"gamma={gamma}: invalid dt={dt}")
         if not np.isfinite(epsilon) or epsilon <= 0.0 or epsilon > 0.5:
             invalid_reasons.append(f"gamma={gamma}: invalid epsilon={epsilon}")
         if not np.isfinite(T) or T <= 0.0 or n_steps <= 0:
             invalid_reasons.append(f"gamma={gamma}: invalid T/N_steps (T={T}, N_steps={n_steps})")
+        if schedule_kwargs.get("enable_phase_adaptation", False) and n_steps > int(schedule_kwargs.get("n_steps_max", N_STEPS_MAX)):
+            invalid_reasons.append(f"gamma={gamma}: N_steps exceeds cap ({n_steps})")
 
     print(
         "Time-grid preflight: "
@@ -179,6 +499,66 @@ def validate_time_grid(gamma_grid, t_multiplier, t_min, dt_ratio, dt_max):
 def resolve_L_values():
     """Filter L list to requested cap."""
     return [L for L in L_VALUES_BASE if L <= L_MAX]
+
+
+def _metadata_path(csv_file: Path) -> Path:
+    return csv_file.with_name(f"{csv_file.stem}_runmeta.json")
+
+
+def _build_run_metadata(*, use_stable_integrator, enable_phase_adaptation, nan_mode, schedule_config):
+    payload = {
+        "run_meta_version": RUN_META_VERSION,
+        "use_stable_integrator": bool(use_stable_integrator),
+        "enable_phase_adaptation": bool(enable_phase_adaptation),
+        "nan_mode": str(nan_mode),
+        "schedule": dict(schedule_config),
+    }
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload["fingerprint"] = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    return payload
+
+
+def _ensure_resume_metadata(csv_file: Path, resume: bool, metadata: dict):
+    meta_path = _metadata_path(csv_file)
+    if csv_file.exists() and resume:
+        if not meta_path.exists():
+            raise ValueError(
+                f"Resume blocked: metadata file missing for {csv_file}. "
+                f"Expected {meta_path}. Use a fresh CSV or regenerate metadata intentionally."
+            )
+        with open(meta_path, "r", encoding="utf-8") as f:
+            current = json.load(f)
+        if current.get("fingerprint") != metadata.get("fingerprint"):
+            raise ValueError(
+                "Resume blocked: run configuration mismatch detected by metadata fingerprint. "
+                f"existing={current.get('fingerprint')} new={metadata.get('fingerprint')}"
+            )
+        return
+
+    if not csv_file.exists() or not resume:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, sort_keys=True)
+
+
+def _apply_adaptive_profile(args):
+    """Apply curated adaptive profile overrides to scheduling arguments."""
+    profile = str(getattr(args, "adaptive_profile", ADAPTIVE_PROFILE_LEGACY))
+    if profile == ADAPTIVE_PROFILE_LEGACY:
+        return
+
+    if profile not in ADAPTIVE_PROFILE_OVERRIDES:
+        raise ValueError(f"Unknown adaptive profile: {profile}")
+
+    if not bool(getattr(args, "enable_phase_adaptation", False)):
+        print(
+            f"Note: --adaptive-profile={profile} is ignored unless --enable-phase-adaptation is set."
+        )
+        return
+
+    for key, value in ADAPTIVE_PROFILE_OVERRIDES[profile].items():
+        setattr(args, key, value)
+
+    print(f"Applied adaptive profile: {profile}")
 
 
 # ============================================================================
@@ -236,24 +616,71 @@ def _run_single_point_with_config(
     dt_ratio=DT_RATIO,
     dt_max=DT_MAX,
     nan_mode="fail_on_nan",
+    enable_phase_adaptation=False,
+    phase_critical_g_min=PHASE_CRITICAL_G_MIN,
+    phase_critical_g_max=PHASE_CRITICAL_G_MAX,
+    phase_steps_mult_before=PHASE_STEPS_MULT_BEFORE,
+    phase_steps_mult_critical=PHASE_STEPS_MULT_CRITICAL,
+    phase_steps_mult_after=PHASE_STEPS_MULT_AFTER,
+    phase_time_mult_before=PHASE_TIME_MULT_BEFORE,
+    phase_time_mult_critical=PHASE_TIME_MULT_CRITICAL,
+    phase_time_mult_after=PHASE_TIME_MULT_AFTER,
+    noncritical_max_step_ratio=NONCRITICAL_MAX_STEP_RATIO,
+    critical_max_step_ratio=CRITICAL_MAX_STEP_RATIO,
+    n_steps_min=N_STEPS_MIN,
+    n_steps_max=N_STEPS_MAX,
+    dt_min=DT_MIN,
+    phase_map=None,
 ):
     if nan_mode not in NAN_MODES:
         raise ValueError(f"Invalid nan_mode={nan_mode}. Expected one of {NAN_MODES}.")
 
+    if enable_phase_adaptation and not use_stable_integrator:
+        raise ValueError("Phase adaptation requires --use-stable-integrator for Stage 1 safety.")
+    if enable_phase_adaptation and nan_mode != "fail_on_nan":
+        raise ValueError("Phase adaptation requires nan_mode='fail_on_nan' for Stage 1 safety.")
+
     seed = int(rng.integers(0, np.iinfo(np.int32).max))
     g = gamma / (4 * J_GLOBAL)
-    T, dt, N_steps, tau = get_time_params_with_config(
+    schedule = build_time_schedule(
         gamma,
         t_multiplier=t_multiplier,
         t_min=t_min,
         dt_ratio=dt_ratio,
         dt_max=dt_max,
+        enable_phase_adaptation=enable_phase_adaptation,
+        phase_critical_g_min=phase_critical_g_min,
+        phase_critical_g_max=phase_critical_g_max,
+        phase_steps_mult_before=phase_steps_mult_before,
+        phase_steps_mult_critical=phase_steps_mult_critical,
+        phase_steps_mult_after=phase_steps_mult_after,
+        phase_time_mult_before=phase_time_mult_before,
+        phase_time_mult_critical=phase_time_mult_critical,
+        phase_time_mult_after=phase_time_mult_after,
+        noncritical_max_step_ratio=noncritical_max_step_ratio,
+        critical_max_step_ratio=critical_max_step_ratio,
+        n_steps_min=n_steps_min,
+        n_steps_max=n_steps_max,
+        dt_min=dt_min,
+        phase_map=phase_map,
     )
+    T = float(schedule["T"])
+    dt = float(schedule["dt"])
+    N_steps = int(schedule["N_steps"])
+    tau = float(schedule["tau"])
+    phase_label = str(schedule["phase_label"])
+    adaptive_schedule = bool(schedule["adaptive_schedule"])
+    phase_source = str(schedule.get("phase_source", "inline"))
+
     epsilon = float(np.sqrt(gamma * dt))
-    if not np.isfinite(dt) or dt <= 0.0 or dt > 1e-2:
+    if not np.isfinite(dt) or dt <= 0.0 or dt > min(float(dt_max), DT_ABSOLUTE_MAX):
         raise ValueError(f"Invalid dt={dt} for L={L}, gamma={gamma}")
     if not np.isfinite(epsilon) or epsilon <= 0.0 or epsilon > 0.5:
         raise ValueError(f"Invalid epsilon={epsilon} for L={L}, gamma={gamma}")
+    if enable_phase_adaptation and (N_steps < int(n_steps_min) or N_steps > int(n_steps_max)):
+        raise ValueError(
+            f"Invalid N_steps={N_steps} for L={L}, gamma={gamma}; expected [{n_steps_min}, {n_steps_max}]"
+        )
 
     start_time = time.time()
     sim = LQubitCorrelationSimulator(
@@ -325,6 +752,9 @@ def _run_single_point_with_config(
         "nan_detected": bool(nan_detected),
         "range_violation": bool(range_violation),
         "point_status": point_status,
+        "phase_label": phase_label,
+        "adaptive_schedule": adaptive_schedule,
+        "phase_source": phase_source,
     }
 
 
@@ -339,6 +769,21 @@ def _build_point_runner(
     dt_ratio=DT_RATIO,
     dt_max=DT_MAX,
     nan_mode="fail_on_nan",
+    enable_phase_adaptation=False,
+    phase_critical_g_min=PHASE_CRITICAL_G_MIN,
+    phase_critical_g_max=PHASE_CRITICAL_G_MAX,
+    phase_steps_mult_before=PHASE_STEPS_MULT_BEFORE,
+    phase_steps_mult_critical=PHASE_STEPS_MULT_CRITICAL,
+    phase_steps_mult_after=PHASE_STEPS_MULT_AFTER,
+    phase_time_mult_before=PHASE_TIME_MULT_BEFORE,
+    phase_time_mult_critical=PHASE_TIME_MULT_CRITICAL,
+    phase_time_mult_after=PHASE_TIME_MULT_AFTER,
+    noncritical_max_step_ratio=NONCRITICAL_MAX_STEP_RATIO,
+    critical_max_step_ratio=CRITICAL_MAX_STEP_RATIO,
+    n_steps_min=N_STEPS_MIN,
+    n_steps_max=N_STEPS_MAX,
+    dt_min=DT_MIN,
+    phase_map=None,
 ):
     return functools.partial(
         _run_single_point_with_config,
@@ -352,6 +797,21 @@ def _build_point_runner(
         dt_ratio=dt_ratio,
         dt_max=dt_max,
         nan_mode=nan_mode,
+        enable_phase_adaptation=enable_phase_adaptation,
+        phase_critical_g_min=phase_critical_g_min,
+        phase_critical_g_max=phase_critical_g_max,
+        phase_steps_mult_before=phase_steps_mult_before,
+        phase_steps_mult_critical=phase_steps_mult_critical,
+        phase_steps_mult_after=phase_steps_mult_after,
+        phase_time_mult_before=phase_time_mult_before,
+        phase_time_mult_critical=phase_time_mult_critical,
+        phase_time_mult_after=phase_time_mult_after,
+        noncritical_max_step_ratio=noncritical_max_step_ratio,
+        critical_max_step_ratio=critical_max_step_ratio,
+        n_steps_min=n_steps_min,
+        n_steps_max=n_steps_max,
+        dt_min=dt_min,
+        phase_map=phase_map,
     )
 
 
@@ -376,6 +836,21 @@ def run_parameter_sweep(
     dt_max=DT_MAX,
     nan_mode="fail_on_nan",
     event_log_path=None,
+    enable_phase_adaptation=False,
+    phase_critical_g_min=PHASE_CRITICAL_G_MIN,
+    phase_critical_g_max=PHASE_CRITICAL_G_MAX,
+    phase_steps_mult_before=PHASE_STEPS_MULT_BEFORE,
+    phase_steps_mult_critical=PHASE_STEPS_MULT_CRITICAL,
+    phase_steps_mult_after=PHASE_STEPS_MULT_AFTER,
+    phase_time_mult_before=PHASE_TIME_MULT_BEFORE,
+    phase_time_mult_critical=PHASE_TIME_MULT_CRITICAL,
+    phase_time_mult_after=PHASE_TIME_MULT_AFTER,
+    noncritical_max_step_ratio=NONCRITICAL_MAX_STEP_RATIO,
+    critical_max_step_ratio=CRITICAL_MAX_STEP_RATIO,
+    n_steps_min=N_STEPS_MIN,
+    n_steps_max=N_STEPS_MAX,
+    dt_min=DT_MIN,
+    phase_map_file=None,
 ):
     if nan_mode not in NAN_MODES:
         raise ValueError(f"Invalid nan_mode={nan_mode}. Expected one of {NAN_MODES}.")
@@ -407,6 +882,19 @@ def run_parameter_sweep(
     print(f"  use stable integrator: {bool(use_stable_integrator)}")
     print(f"  enable stability monitor: {bool(enable_stability_monitor)}")
     print(f"  nan mode: {nan_mode}")
+    print(f"  enable phase adaptation: {bool(enable_phase_adaptation)}")
+
+    phase_map = None
+    if phase_map_file is not None:
+        phase_map = load_phase_map_artifact(phase_map_file)
+        phase_critical_g_min = float(phase_map["critical_g_min"])
+        phase_critical_g_max = float(phase_map["critical_g_max"])
+        print(f"  phase-map file: {Path(phase_map_file)}")
+        print(
+            "  phase-map critical window: "
+            f"[{phase_critical_g_min:.6g}, {phase_critical_g_max:.6g}] "
+            f"(method={phase_map.get('method')}, fingerprint={phase_map.get('fingerprint')})"
+        )
     print(
         "  time-grid: "
         f"t_multiplier={float(t_multiplier):.6g}, "
@@ -414,13 +902,72 @@ def run_parameter_sweep(
         f"dt_ratio={float(dt_ratio):.6g}, "
         f"dt_max={float(dt_max):.6g}"
     )
+    if enable_phase_adaptation:
+        print(
+            "  phase profile: "
+            f"critical_g=[{float(phase_critical_g_min):.3g}, {float(phase_critical_g_max):.3g}], "
+            f"steps_mult(before/critical/after)=({phase_steps_mult_before:.3g}/{phase_steps_mult_critical:.3g}/{phase_steps_mult_after:.3g}), "
+            f"time_mult(before/critical/after)=({phase_time_mult_before:.3g}/{phase_time_mult_critical:.3g}/{phase_time_mult_after:.3g}), "
+            f"max_step_ratio(noncritical/critical)=({noncritical_max_step_ratio:.3g}/{critical_max_step_ratio:.3g}), "
+            f"N_steps=[{int(n_steps_min)}, {int(n_steps_max)}], dt_min={float(dt_min):.3g}"
+        )
+
+    if enable_phase_adaptation and not use_stable_integrator:
+        raise ValueError("Phase adaptation requires --use-stable-integrator.")
+    if enable_phase_adaptation and nan_mode != "fail_on_nan":
+        raise ValueError("Phase adaptation requires --nan-mode fail_on_nan.")
+
     validate_time_grid(
         gamma_grid,
         t_multiplier=t_multiplier,
         t_min=t_min,
         dt_ratio=dt_ratio,
         dt_max=dt_max,
+        enable_phase_adaptation=enable_phase_adaptation,
+        phase_critical_g_min=phase_critical_g_min,
+        phase_critical_g_max=phase_critical_g_max,
+        phase_steps_mult_before=phase_steps_mult_before,
+        phase_steps_mult_critical=phase_steps_mult_critical,
+        phase_steps_mult_after=phase_steps_mult_after,
+        phase_time_mult_before=phase_time_mult_before,
+        phase_time_mult_critical=phase_time_mult_critical,
+        phase_time_mult_after=phase_time_mult_after,
+        noncritical_max_step_ratio=noncritical_max_step_ratio,
+        critical_max_step_ratio=critical_max_step_ratio,
+        n_steps_min=n_steps_min,
+        n_steps_max=n_steps_max,
+        dt_min=dt_min,
+        phase_map=phase_map,
     )
+    schedule_config = {
+        "t_multiplier": float(t_multiplier),
+        "t_min": float(t_min),
+        "dt_ratio": float(dt_ratio),
+        "dt_max": float(dt_max),
+        "dt_min": float(dt_min),
+        "enable_phase_adaptation": bool(enable_phase_adaptation),
+        "phase_critical_g_min": float(phase_critical_g_min),
+        "phase_critical_g_max": float(phase_critical_g_max),
+        "phase_steps_mult_before": float(phase_steps_mult_before),
+        "phase_steps_mult_critical": float(phase_steps_mult_critical),
+        "phase_steps_mult_after": float(phase_steps_mult_after),
+        "phase_time_mult_before": float(phase_time_mult_before),
+        "phase_time_mult_critical": float(phase_time_mult_critical),
+        "phase_time_mult_after": float(phase_time_mult_after),
+        "noncritical_max_step_ratio": float(noncritical_max_step_ratio),
+        "critical_max_step_ratio": float(critical_max_step_ratio),
+        "n_steps_min": int(n_steps_min),
+        "n_steps_max": int(n_steps_max),
+        "phase_map_file": str(phase_map_file) if phase_map_file is not None else None,
+        "phase_map_fingerprint": _phase_map_fingerprint(phase_map),
+    }
+    run_meta = _build_run_metadata(
+        use_stable_integrator=bool(use_stable_integrator),
+        enable_phase_adaptation=bool(enable_phase_adaptation),
+        nan_mode=nan_mode,
+        schedule_config=schedule_config,
+    )
+    _ensure_resume_metadata(csv_file=csv_file, resume=resume, metadata=run_meta)
     print()
 
     if resume and csv_file.exists():
@@ -464,6 +1011,21 @@ def run_parameter_sweep(
         dt_ratio=dt_ratio,
         dt_max=dt_max,
         nan_mode=nan_mode,
+        enable_phase_adaptation=enable_phase_adaptation,
+        phase_critical_g_min=phase_critical_g_min,
+        phase_critical_g_max=phase_critical_g_max,
+        phase_steps_mult_before=phase_steps_mult_before,
+        phase_steps_mult_critical=phase_steps_mult_critical,
+        phase_steps_mult_after=phase_steps_mult_after,
+        phase_time_mult_before=phase_time_mult_before,
+        phase_time_mult_critical=phase_time_mult_critical,
+        phase_time_mult_after=phase_time_mult_after,
+        noncritical_max_step_ratio=noncritical_max_step_ratio,
+        critical_max_step_ratio=critical_max_step_ratio,
+        n_steps_min=n_steps_min,
+        n_steps_max=n_steps_max,
+        dt_min=dt_min,
+        phase_map=phase_map,
     )
 
     try:
@@ -638,6 +1200,61 @@ def main():
     parser.add_argument("--t-min", type=float, default=T_MIN)
     parser.add_argument("--dt-ratio", type=float, default=DT_RATIO)
     parser.add_argument("--dt-max", type=float, default=DT_MAX)
+    parser.add_argument("--dt-min", type=float, default=DT_MIN)
+    parser.add_argument("--n-steps-min", type=int, default=N_STEPS_MIN)
+    parser.add_argument("--n-steps-max", type=int, default=N_STEPS_MAX)
+    parser.add_argument("--enable-phase-adaptation", action="store_true")
+    parser.add_argument(
+        "--adaptive-profile",
+        choices=[ADAPTIVE_PROFILE_LEGACY, ADAPTIVE_PROFILE_NEXT_PASS_V1],
+        default=ADAPTIVE_PROFILE_LEGACY,
+        help="Curated adaptive schedule profile. Applied only when --enable-phase-adaptation is set.",
+    )
+    parser.add_argument("--phase-critical-g-min", type=float, default=PHASE_CRITICAL_G_MIN)
+    parser.add_argument("--phase-critical-g-max", type=float, default=PHASE_CRITICAL_G_MAX)
+    parser.add_argument("--phase-steps-mult-before", type=float, default=PHASE_STEPS_MULT_BEFORE)
+    parser.add_argument("--phase-steps-mult-critical", type=float, default=PHASE_STEPS_MULT_CRITICAL)
+    parser.add_argument("--phase-steps-mult-after", type=float, default=PHASE_STEPS_MULT_AFTER)
+    parser.add_argument("--phase-time-mult-before", type=float, default=PHASE_TIME_MULT_BEFORE)
+    parser.add_argument("--phase-time-mult-critical", type=float, default=PHASE_TIME_MULT_CRITICAL)
+    parser.add_argument("--phase-time-mult-after", type=float, default=PHASE_TIME_MULT_AFTER)
+    parser.add_argument("--noncritical-max-step-ratio", type=float, default=NONCRITICAL_MAX_STEP_RATIO)
+    parser.add_argument("--critical-max-step-ratio", type=float, default=CRITICAL_MAX_STEP_RATIO)
+    parser.add_argument(
+        "--phase-map-file",
+        type=str,
+        default=None,
+        help="Static phase-map artifact JSON from calibration pass (two-pass mode).",
+    )
+    parser.add_argument(
+        "--build-phase-map-from-csv",
+        type=str,
+        default=None,
+        help="Build phase-map artifact from calibration CSV before running.",
+    )
+    parser.add_argument(
+        "--phase-map-output",
+        type=str,
+        default=None,
+        help="Output path for built phase-map JSON (default: <calibration_csv_stem>_phase_map.json).",
+    )
+    parser.add_argument(
+        "--phase-map-slope-threshold",
+        type=float,
+        default=PHASE_MAP_SLOPE_THRESHOLD,
+        help="Relative threshold on |d(1+<z^2>)/dlog10(g)| used to derive critical window.",
+    )
+    parser.add_argument(
+        "--phase-map-min-points",
+        type=int,
+        default=PHASE_MAP_MIN_POINTS,
+        help="Minimum finite points required to derive phase map.",
+    )
+    parser.add_argument(
+        "--build-phase-map-only",
+        action="store_true",
+        help="Build phase-map artifact and exit without running sweep.",
+    )
     parser.add_argument(
         "--event-log",
         type=str,
@@ -652,8 +1269,45 @@ def main():
     )
 
     args = parser.parse_args()
+    _apply_adaptive_profile(args)
+
     if args.t_multiplier <= 0 or args.t_min <= 0 or args.dt_ratio <= 0 or args.dt_max <= 0:
         raise ValueError("Time-grid overrides must be positive: --t-multiplier, --t-min, --dt-ratio, --dt-max")
+    if args.dt_max > DT_ABSOLUTE_MAX:
+        raise ValueError(f"--dt-max must be <= {DT_ABSOLUTE_MAX}")
+    if args.dt_min <= 0:
+        raise ValueError("--dt-min must be positive")
+    if args.n_steps_min <= 0 or args.n_steps_max <= 0 or args.n_steps_min > args.n_steps_max:
+        raise ValueError("Require 0 < --n-steps-min <= --n-steps-max")
+    if args.phase_critical_g_min <= 0 or args.phase_critical_g_max <= 0:
+        raise ValueError("Phase critical-g bounds must be positive")
+    if args.phase_critical_g_min >= args.phase_critical_g_max:
+        raise ValueError("Require --phase-critical-g-min < --phase-critical-g-max")
+    if args.noncritical_max_step_ratio <= 0 or args.critical_max_step_ratio <= 0:
+        raise ValueError("Step-ratio limits must be positive")
+    if args.noncritical_max_step_ratio > args.critical_max_step_ratio:
+        raise ValueError("Expected --noncritical-max-step-ratio <= --critical-max-step-ratio")
+
+    if args.phase_map_file is not None and args.build_phase_map_from_csv is not None:
+        raise ValueError("Use either --phase-map-file or --build-phase-map-from-csv, not both.")
+
+    resolved_phase_map_file = args.phase_map_file
+    if args.build_phase_map_from_csv is not None:
+        source_csv = Path(args.build_phase_map_from_csv)
+        if args.phase_map_output is not None:
+            output_path = Path(args.phase_map_output)
+        else:
+            output_path = source_csv.with_name(f"{source_csv.stem}_phase_map.json")
+        built = build_phase_map_artifact(
+            calibration_csv=source_csv,
+            output_path=output_path,
+            slope_threshold_rel=args.phase_map_slope_threshold,
+            min_points=args.phase_map_min_points,
+        )
+        print(f"Built phase-map artifact: {built}")
+        resolved_phase_map_file = str(built)
+        if args.build_phase_map_only:
+            return
 
     csv_file = Path(args.csv) if args.csv else DEFAULT_CSV
 
@@ -676,6 +1330,21 @@ def main():
         t_min=args.t_min,
         dt_ratio=args.dt_ratio,
         dt_max=args.dt_max,
+        dt_min=args.dt_min,
+        n_steps_min=args.n_steps_min,
+        n_steps_max=args.n_steps_max,
+        enable_phase_adaptation=args.enable_phase_adaptation,
+        phase_critical_g_min=args.phase_critical_g_min,
+        phase_critical_g_max=args.phase_critical_g_max,
+        phase_steps_mult_before=args.phase_steps_mult_before,
+        phase_steps_mult_critical=args.phase_steps_mult_critical,
+        phase_steps_mult_after=args.phase_steps_mult_after,
+        phase_time_mult_before=args.phase_time_mult_before,
+        phase_time_mult_critical=args.phase_time_mult_critical,
+        phase_time_mult_after=args.phase_time_mult_after,
+        noncritical_max_step_ratio=args.noncritical_max_step_ratio,
+        critical_max_step_ratio=args.critical_max_step_ratio,
+        phase_map_file=resolved_phase_map_file,
         nan_mode=args.nan_mode,
         event_log_path=args.event_log,
     )

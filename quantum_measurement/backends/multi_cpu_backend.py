@@ -293,6 +293,8 @@ class MultiCpuBackend:
                         "point_status": row.get("point_status", "ok"),
                         "runtime_sec": row.get("runtime_sec"),
                         "z2_mean": row.get("z2_mean"),
+                        "phase_label": row.get("phase_label"),
+                        "adaptive_schedule": row.get("adaptive_schedule"),
                     },
                 )
                 results_by_idx[idx] = row
