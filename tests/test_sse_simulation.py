@@ -36,6 +36,13 @@ class TestSSEInitialization:
         sim = SSEWavefunctionSimulator(rng=None)
         assert sim.rng is not None
 
+    def test_accepts_device_cpu(self):
+        sim = SSEWavefunctionSimulator(device="cpu", N_steps=5, rng=np.random.default_rng(1))
+        Q, z_traj, meas = sim.simulate_trajectory()
+        assert np.isfinite(Q)
+        assert z_traj.shape == (6,)
+        assert meas.shape == (5,)
+
 
 class TestPrepareInitialState:
     """Test all preset initial states return normalized wavefunctions."""
@@ -170,6 +177,30 @@ class TestSimulateTrajectory:
         _, _, meas = sim.simulate_trajectory()
         assert set(np.unique(meas)).issubset({-1, 1})
 
+    def test_batch_size_one_parity(self, minimal_params_sse):
+        """Batch trajectory with n_batch=1 should match serial for same xi sequence."""
+        n_steps = minimal_params_sse["N_steps"]
+        seed = 123
+        sim = SSEWavefunctionSimulator(**{**minimal_params_sse, "rng": np.random.default_rng(seed)})
+
+        Q_serial, z_serial, meas_serial = sim.simulate_trajectory()
+
+        rng_for_xi = np.random.default_rng(seed)
+        xi_random = rng_for_xi.random((1, n_steps))
+        xi_batch = np.where(xi_random < 0.5, 1, -1).astype(np.int8)
+        Q_batch, z_batch, meas_batch = sim.simulate_trajectory_batch(1, xi_batch=xi_batch)
+
+        assert np.allclose(Q_batch[0], Q_serial, atol=1e-12)
+        assert np.allclose(z_batch[0], z_serial, atol=1e-12)
+        assert np.array_equal(meas_batch[0], meas_serial)
+
+    def test_batch_shapes(self, minimal_params_sse):
+        sim = SSEWavefunctionSimulator(**minimal_params_sse)
+        Q, z, meas = sim.simulate_trajectory_batch(4)
+        assert Q.shape == (4,)
+        assert z.shape == (4, sim.N_steps + 1)
+        assert meas.shape == (4, sim.N_steps)
+
 
 class TestSimulateEnsemble:
     """Test simulate_ensemble produces consistent distributions."""
@@ -186,6 +217,13 @@ class TestSimulateEnsemble:
         sim = SSEWavefunctionSimulator(**minimal_params_sse)
         Q_vals, _, _ = sim.simulate_ensemble(10)
         assert np.all(np.isfinite(Q_vals))
+
+    def test_ensemble_batch_shapes(self, minimal_params_sse):
+        sim = SSEWavefunctionSimulator(**minimal_params_sse)
+        Q_vals, z_trajs, meas = sim.simulate_ensemble(7, batch_size=3)
+        assert Q_vals.shape == (7,)
+        assert z_trajs.shape == (7, sim.N_steps + 1)
+        assert meas.shape == (7, sim.N_steps)
 
     @pytest.mark.slow
     def test_ensemble_mean_q_positive(self):

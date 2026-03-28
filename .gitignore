@@ -9,5 +9,10 @@ venv/
 *.csv
 venv/*
 results/*
-*/*.log
-*/*.pid
+rust/*
+*.log
+*.pid
+.github/
+*.out
+*.state
+logs/

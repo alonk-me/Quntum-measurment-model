@@ -50,8 +50,40 @@ production notes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from typing import Any, Optional, Tuple
+import logging
+import warnings
 import numpy as np
+from scipy.linalg import expm
+
+from quantum_measurement.backends import Backend, get_backend
+from quantum_measurement.utilities.gpu_utils import estimate_trajectory_batch_size
+
+
+_LOGGER = logging.getLogger(__name__)
+_TAU_Y_CACHE: dict[int, np.ndarray] = {}
+
+
+@dataclass
+class InstabilityMonitor:
+    projector_threshold: float = 1e-10
+    hermitian_threshold: float = 1e-13
+    bdg_threshold: float = 1e-10
+    projector: list[float] = field(default_factory=list)
+    hermitian: list[float] = field(default_factory=list)
+    bdg: list[float] = field(default_factory=list)
+
+    def append(self, projector: float, hermitian: float, bdg: float) -> None:
+        self.projector.append(float(projector))
+        self.hermitian.append(float(hermitian))
+        self.bdg.append(float(bdg))
+
+    def snapshot(self) -> dict[str, np.ndarray]:
+        return {
+            "projector": np.asarray(self.projector, dtype=float),
+            "hermitian": np.asarray(self.hermitian, dtype=float),
+            "bdg": np.asarray(self.bdg, dtype=float),
+        }
 
 
 @dataclass
@@ -77,6 +109,11 @@ class LQubitCorrelationSimulator:
         If ``True`` the chain has periodic (closed) boundary conditions
         and the last site is coupled back to the first.  If ``False``
         the chain is open.
+    stable_projector_enforce : bool, optional
+        If ``True``, snap the spectrum of ``G`` to ``{0,1}`` after each
+        stable step. This is a legacy guard intended for explicit Euler
+        drift repair. It should not be used with the stable integrator,
+        where interior eigenvalue dynamics are physical signal.
     rng : numpy.random.Generator or None, optional
         Random number generator used for sampling measurement outcomes.
         When ``None`` a new default RNG is constructed.
@@ -88,14 +125,28 @@ class LQubitCorrelationSimulator:
     N_steps: int = 1000
     T: float = 1.0
     closed_boundary: bool = False
+    device: str = "cpu"
+    use_stable_integrator: bool = False
+    enable_stability_monitor: bool = False
+    stable_projector_enforce: bool = False
+    bdg_enforce_threshold: float | None = None
+    backend: Backend | None = field(default=None, repr=False)
     rng: Optional[np.random.Generator] = field(default=None, repr=False)
 
     # Derived quantities initialised after construction
     dt: float = field(init=False)
-    h: np.ndarray = field(init=False, repr=False)
-    G_initial: np.ndarray = field(init=False, repr=False)
+    h: Any = field(init=False, repr=False)
+    G_initial: Any = field(init=False, repr=False)
+    _tau_y: Any = field(init=False, repr=False)
+    _identity_2L: Any = field(init=False, repr=False)
+    _u_ham: Any | None = field(init=False, default=None, repr=False)
+    _stable_mode_active: bool = field(init=False, default=False, repr=False)
+    _stability_monitor: InstabilityMonitor | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.backend is None:
+            self.backend = get_backend(self.device)
+
         # Validate input
         if self.L < 1:
             raise ValueError("L must be at least 1")
@@ -103,6 +154,8 @@ class LQubitCorrelationSimulator:
             raise ValueError("N_steps must be at least 1")
         if self.T <= 0.0:
             raise ValueError("T must be positive")
+        if not np.isfinite(self.epsilon) or self.epsilon <= 0.0:
+            raise ValueError("epsilon must be finite and positive")
 
         # Initialise RNG
         if self.rng is None:
@@ -110,17 +163,59 @@ class LQubitCorrelationSimulator:
 
         # Time step
         self.dt = self.T / self.N_steps
+        if not np.isfinite(self.dt) or self.dt <= 0.0:
+            raise ValueError("dt must be finite and positive")
 
         # Build the BdG Hamiltonian
         self.h = self._build_hamiltonian()
+        self._tau_y = self.backend.array(self._build_tau_y(self.L), dtype=complex)
+        self._identity_2L = self.backend.array(np.eye(2 * self.L, dtype=complex), dtype=complex)
+
+        if self.use_stable_integrator and self.backend.is_gpu:
+            warnings.warn(
+                "Stable integrator is currently CPU-only; falling back to Euler path on GPU backend.",
+                RuntimeWarning,
+            )
+        if self.use_stable_integrator and self.stable_projector_enforce:
+            warnings.warn(
+                "projector snap is incompatible with stable integrator - interior eigenvalue dynamics will be erased. "
+                "Set stable_projector_enforce=False or use Euler path.",
+                UserWarning,
+            )
+        self._stable_mode_active = bool(self.use_stable_integrator and (not self.backend.is_gpu))
+        if self._stable_mode_active:
+            h_np = np.asarray(self.backend.asnumpy(self.h), dtype=complex)
+            u_left = expm(2.0j * h_np * self.dt)
+            u_right = expm(-2.0j * h_np * self.dt)
+            self._u_ham = (u_left, u_right)
+
+        if self.enable_stability_monitor:
+            self._stability_monitor = InstabilityMonitor()
 
         # Construct initial correlation matrix: ones on the first L diagonal
         # entries (occupied modes) and zeros on the last L (empty modes).
-        self.G_initial = np.zeros((2 * self.L, 2 * self.L), dtype=complex)
+        self.G_initial = self.backend.zeros((2 * self.L, 2 * self.L), dtype=complex)
         for i in range(self.L):
             self.G_initial[i, i] = 1.0 + 0.0j
 
-    def _build_hamiltonian(self) -> np.ndarray:
+    @staticmethod
+    def _build_tau_y(L: int) -> np.ndarray:
+        cached = _TAU_Y_CACHE.get(L)
+        if cached is not None:
+            return cached
+
+        eye = np.eye(L, dtype=complex)
+        zero = np.zeros((L, L), dtype=complex)
+        tau_y = np.block(
+            [
+                [zero, -1.0j * eye],
+                [1.0j * eye, zero],
+            ]
+        )
+        _TAU_Y_CACHE[L] = tau_y
+        return tau_y
+
+    def _build_hamiltonian(self) -> Any:
         r"""Construct the 2L×2L Bogoliubov–de Gennes Hamiltonian ``h``.
 
         The matrix ``h`` is built from four L×L blocks ``h11``, ``h12``,
@@ -144,10 +239,10 @@ class LQubitCorrelationSimulator:
         """
         L = self.L
         J = self.J
-        h11 = np.zeros((L, L), dtype=complex)
-        h12 = np.zeros((L, L), dtype=complex)
-        h21 = np.zeros((L, L), dtype=complex)
-        h22 = np.zeros((L, L), dtype=complex)
+        h11 = self.backend.zeros((L, L), dtype=complex)
+        h12 = self.backend.zeros((L, L), dtype=complex)
+        h21 = self.backend.zeros((L, L), dtype=complex)
+        h22 = self.backend.zeros((L, L), dtype=complex)
 
         # Fill off‑diagonal entries corresponding to nearest neighbours
         for i in range(L - 1):
@@ -166,12 +261,12 @@ class LQubitCorrelationSimulator:
             h21[i, j] = +J
 
         # Assemble full BdG matrix
-        top = np.hstack((h11, h12))
-        bottom = np.hstack((h21, h22))
-        h = np.vstack((top, bottom))
+        top = self.backend.hstack((h11, h12))
+        bottom = self.backend.hstack((h21, h22))
+        h = self.backend.vstack((top, bottom))
         return h
 
-    def _compute_z_values(self, G: np.ndarray) -> np.ndarray:
+    def _compute_z_values(self, G: Any) -> np.ndarray:
         r"""Compute the expectation values ⟨σ^z_i⟩ for each site.
 
         In the Jordan–Wigner mapping the magnetisation on site ``i`` is
@@ -183,10 +278,161 @@ class LQubitCorrelationSimulator:
         where ``i`` refers to the annihilation index ``0 ≤ i < L``.  The
         returned array has shape ``(L,)``.
         """
-        z = 2.0 * np.real(np.diag(G)[: self.L]) - 1.0
+        diag_real = self.backend.asnumpy(self.backend.real(self.backend.diag(G)))
+        z = 2.0 * diag_real[: self.L] - 1.0
         return z.astype(float)
 
-    def _hamiltonian_step(self, G: np.ndarray) -> np.ndarray:
+    def _enforce_bdg(self, G: Any) -> Any:
+        G_ph = self._identity_2L - self.backend.matmul(
+            self.backend.matmul(self._tau_y, self.backend.conj(G)),
+            self._tau_y,
+        )
+        return 0.5 * (G + G_ph)
+
+    def _enforce_bdg_batch(self, G_batch: Any) -> Any:
+        G_ph = self._identity_2L - self.backend.matmul(
+            self.backend.matmul(self._tau_y, self.backend.conj(G_batch)),
+            self._tau_y,
+        )
+        return 0.5 * (G_batch + G_ph)
+
+    def _enforce_hermiticity(self, G: Any) -> Any:
+        return 0.5 * (G + self.backend.conj(self.backend.transpose(G)))
+
+    def _enforce_hermiticity_batch(self, G_batch: Any) -> Any:
+        return 0.5 * (G_batch + self.backend.conj(np.swapaxes(G_batch, -1, -2)))
+
+    def _clip_diag_probabilities(self, G: Any) -> Any:
+        """Clip diagonal occupations into [0, 1] without projector snapping."""
+        diag = self.backend.real(self.backend.diag(G))
+        diag_clipped = self.backend.asnumpy(self.backend.clip(diag, 0.0, 1.0))
+        for i in range(2 * self.L):
+            G[i, i] = float(diag_clipped[i]) + 0.0j
+        return G
+
+    def _clip_diag_probabilities_batch(self, G_batch: Any) -> Any:
+        """Batch diagonal clipping counterpart for stable path updates."""
+        return self.backend.symmetrize_clip_diag_inplace(G_batch)
+
+    def _enforce_projector(self, G: Any) -> Any:
+        g_np = np.asarray(self.backend.asnumpy(G), dtype=complex)
+        g_herm = 0.5 * (g_np + g_np.conj().T)
+        eigvals, eigvecs = np.linalg.eigh(g_herm)
+        snapped = (eigvals >= 0.5).astype(float)
+        g_proj = (eigvecs * snapped) @ eigvecs.conj().T
+        return self.backend.array(g_proj, dtype=complex)
+
+    def _enforce_projector_batch(self, G_batch: Any) -> Any:
+        g_np = np.asarray(self.backend.asnumpy(G_batch), dtype=complex)
+        out = np.empty_like(g_np)
+        for idx in range(g_np.shape[0]):
+            g_herm = 0.5 * (g_np[idx] + g_np[idx].conj().T)
+            eigvals, eigvecs = np.linalg.eigh(g_herm)
+            snapped = (eigvals >= 0.5).astype(float)
+            out[idx] = (eigvecs * snapped) @ eigvecs.conj().T
+        return self.backend.array(out, dtype=complex)
+
+    def _exact_hamiltonian_step(self, G: Any) -> Any:
+        if self._u_ham is None:
+            raise RuntimeError("Stable integrator requested without precomputed unitary")
+        if not isinstance(self._u_ham, tuple) or len(self._u_ham) != 2:
+            raise RuntimeError("Stable integrator precomputation is malformed")
+        U_left = self.backend.array(self._u_ham[0], dtype=complex)
+        U_right = self.backend.array(self._u_ham[1], dtype=complex)
+        return self.backend.matmul(self.backend.matmul(U_left, G), U_right)
+
+    def _exact_hamiltonian_step_batch(self, G_batch: Any) -> Any:
+        if self._u_ham is None:
+            raise RuntimeError("Stable integrator requested without precomputed unitary")
+        return self.backend.batched_commutator_update(
+            G_batch,
+            self.h,
+            self.dt,
+            use_stable_integrator=True,
+            precomputed_u=self._u_ham,
+        )
+
+    def _update_stability_monitor(self, G: Any) -> None:
+        if self._stability_monitor is None:
+            return
+
+        g_np = np.asarray(self.backend.asnumpy(G), dtype=complex)
+        if not np.all(np.isfinite(g_np)):
+            raise RuntimeError("InstabilityMonitor detected NaN/Inf in correlation matrix")
+
+        tau_y = np.asarray(self.backend.asnumpy(self._tau_y), dtype=complex)
+        identity = np.eye(2 * self.L, dtype=complex)
+        projector = np.linalg.norm(g_np @ g_np - g_np, ord="fro")
+        hermitian = np.linalg.norm(g_np - g_np.conj().T, ord="fro")
+        bdg = np.linalg.norm(tau_y @ g_np.conj() @ tau_y + g_np - identity, ord="fro")
+
+        if not np.isfinite(projector) or not np.isfinite(hermitian) or not np.isfinite(bdg):
+            raise RuntimeError("InstabilityMonitor detected NaN/Inf in residuals")
+
+        self._stability_monitor.append(projector, hermitian, bdg)
+
+        if projector > self._stability_monitor.projector_threshold:
+            _LOGGER.warning("Projector residual exceeded threshold: %.3e", projector)
+        if hermitian > self._stability_monitor.hermitian_threshold:
+            _LOGGER.warning("Hermitian residual exceeded threshold: %.3e", hermitian)
+        if bdg > self._stability_monitor.bdg_threshold:
+            _LOGGER.warning("BdG residual exceeded threshold: %.3e", bdg)
+
+    def _bdg_residual_fro(self, G: Any) -> float:
+        g_np = np.asarray(self.backend.asnumpy(G), dtype=complex)
+        tau_y = np.asarray(self.backend.asnumpy(self._tau_y), dtype=complex)
+        identity = np.eye(2 * self.L, dtype=complex)
+        return float(np.linalg.norm(tau_y @ g_np.conj() @ tau_y + g_np - identity, ord="fro"))
+
+    def _bdg_residual_fro_batch(self, G_batch: Any) -> np.ndarray:
+        g_np = np.asarray(self.backend.asnumpy(G_batch), dtype=complex)
+        tau_y = np.asarray(self.backend.asnumpy(self._tau_y), dtype=complex)
+        identity = np.eye(2 * self.L, dtype=complex)
+        residuals = np.empty(g_np.shape[0], dtype=float)
+        for idx in range(g_np.shape[0]):
+            g = g_np[idx]
+            residuals[idx] = float(np.linalg.norm(tau_y @ g.conj() @ tau_y + g - identity, ord="fro"))
+        return residuals
+
+    def _maybe_enforce_bdg(self, G: Any) -> Any:
+        threshold = self.bdg_enforce_threshold
+        if threshold is None:
+            return G
+        if float(threshold) <= 0.0:
+            return self._enforce_bdg(G)
+        if self._bdg_residual_fro(G) > float(threshold):
+            return self._enforce_bdg(G)
+        return G
+
+    def _maybe_enforce_bdg_batch(self, G_batch: Any) -> Any:
+        threshold = self.bdg_enforce_threshold
+        if threshold is None:
+            return G_batch
+        if float(threshold) <= 0.0:
+            return self._enforce_bdg_batch(G_batch)
+
+        residuals = self._bdg_residual_fro_batch(G_batch)
+        mask = residuals > float(threshold)
+        if not np.any(mask):
+            return G_batch
+        if np.all(mask):
+            return self._enforce_bdg_batch(G_batch)
+
+        g_np = np.asarray(self.backend.asnumpy(G_batch), dtype=complex)
+        tau_y = np.asarray(self.backend.asnumpy(self._tau_y), dtype=complex)
+        identity = np.eye(2 * self.L, dtype=complex)
+        for idx in np.where(mask)[0]:
+            g = g_np[idx]
+            g_ph = identity - tau_y @ g.conj() @ tau_y
+            g_np[idx] = 0.5 * (g + g_ph)
+        return self.backend.array(g_np, dtype=complex)
+
+    def get_stability_monitor_data(self) -> dict[str, np.ndarray]:
+        if self._stability_monitor is None:
+            return {"projector": np.array([], dtype=float), "hermitian": np.array([], dtype=float), "bdg": np.array([], dtype=float)}
+        return self._stability_monitor.snapshot()
+
+    def _hamiltonian_step(self, G: Any) -> Any:
         r"""Apply a single time step of unitary evolution under ``h``.
 
         The Hamiltonian contribution to the equation of motion is
@@ -200,11 +446,14 @@ class LQubitCorrelationSimulator:
         discretisation suffices for small ``dt`` and is consistent
         with the implementation used in the original two‑site code.
         """
-        commutator = G @ self.h - self.h @ G
+        if self._stable_mode_active:
+            return self._exact_hamiltonian_step(G)
+
+        commutator = self.backend.matmul(G, self.h) - self.backend.matmul(self.h, G)
         dG = -2.0j * self.dt * commutator
         return G + dG
 
-    def _measurement_step(self, G: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _measurement_step(self, G: Any, apply_projection: bool = True) -> Tuple[Any, np.ndarray]:
         r"""Apply a measurement step with stochastic outcomes on each site.
 
         Measurement back‑action on the correlation matrix is modelled by
@@ -234,26 +483,156 @@ class LQubitCorrelationSimulator:
         # Construct xi_hat as a diagonal matrix with +xi on the particle
         # sector and -xi on the hole sector
         xi_hat_diag = np.concatenate((xi, -xi)).astype(complex)
-        xi_hat = np.diag(xi_hat_diag)
+        xi_hat = self.backend.array(self.backend.diag(xi_hat_diag), dtype=complex)
 
         # Stochastic term proportional to ε
-        stochastic = self.epsilon * (G @ xi_hat + xi_hat @ G - 2.0 * G @ xi_hat @ G)
+        stochastic = self.epsilon * (
+            self.backend.matmul(G, xi_hat)
+            + self.backend.matmul(xi_hat, G)
+            - 2.0 * self.backend.matmul(self.backend.matmul(G, xi_hat), G)
+        )
         # Deterministic damping term proportional to ε²
-        G_diag = np.diag(np.diag(G))
+        G_diag = self.backend.diag(self.backend.diag(G))
         damping = - (self.epsilon ** 2) * (G - G_diag)
 
         G_new = G + stochastic + damping
 
-        # Symmetrise to counteract numerical drift and enforce Hermiticity
-        G_new = 0.5 * (G_new + G_new.conj().T)
+        if apply_projection:
+            # Symmetrise to counteract numerical drift and enforce Hermiticity
+            G_new = 0.5 * (G_new + self.backend.conj(self.backend.transpose(G_new)))
 
-        # Clip diagonal entries (occupation probabilities) into [0,1]
-        diag = np.diag(G_new).copy()
-        diag_clipped = np.clip(np.real(diag), 0.0, 1.0)
-        for i in range(2 * self.L):
-            G_new[i, i] = diag_clipped[i] + 0.0j
+            # Clip diagonal entries (occupation probabilities) into [0,1]
+            diag = self.backend.real(self.backend.diag(G_new))
+            diag_clipped = self.backend.asnumpy(self.backend.clip(diag, 0.0, 1.0))
+            for i in range(2 * self.L):
+                G_new[i, i] = float(diag_clipped[i]) + 0.0j
 
         return G_new, xi
+
+    def _compute_z_values_batch(self, G_batch: Any) -> np.ndarray:
+        """Compute z values for a batch of correlation matrices.
+
+        Parameters
+        ----------
+        G_batch : backend array
+            Shape (n_batch, 2L, 2L)
+        """
+        diag = self.backend.real(G_batch[:, range(self.L), range(self.L)])
+        z = 2.0 * self.backend.asnumpy(diag) - 1.0
+        return z.astype(float)
+
+    def _hamiltonian_step_batch(self, G_batch: Any) -> Any:
+        """Apply Hamiltonian step to a batch of trajectories."""
+        if self._stable_mode_active:
+            return self._exact_hamiltonian_step_batch(G_batch)
+
+        return self.backend.batched_commutator_update(G_batch, self.h, self.dt)
+
+    def _measurement_step_batch(self, G_batch: Any, xi_step: Any, apply_projection: bool = True) -> Any:
+        """Apply measurement evolution to a batch for one time step."""
+        n_batch = int(G_batch.shape[0])
+        dim = 2 * self.L
+
+        xi_hat = self.backend.get_workspace("lq_xi_hat", (n_batch, dim, dim), complex)
+        for site in range(self.L):
+            xi_hat[:, site, site] = xi_step[:, site]
+            xi_hat[:, site + self.L, site + self.L] = -xi_step[:, site]
+
+        stochastic = self.epsilon * (
+            self.backend.matmul(G_batch, xi_hat)
+            + self.backend.matmul(xi_hat, G_batch)
+            - 2.0 * self.backend.matmul(self.backend.matmul(G_batch, xi_hat), G_batch)
+        )
+
+        damping = - (self.epsilon ** 2) * G_batch
+
+        G_new = G_batch + stochastic + damping
+        for idx in range(dim):
+            G_new[:, idx, idx] += (self.epsilon ** 2) * G_batch[:, idx, idx]
+
+        if apply_projection:
+            G_new = self.backend.symmetrize_clip_diag_inplace(G_new)
+
+        return G_new
+
+    def _stable_step_single(self, G: Any) -> Tuple[Any, np.ndarray]:
+        # Stable update order: exact Hamiltonian -> measurement -> single BdG enforcement -> Hermiticity.
+        G = self._hamiltonian_step(G)
+        G, xi = self._measurement_step(G, apply_projection=False)
+        G = self._maybe_enforce_bdg(G)
+        G = self._enforce_hermiticity(G)
+        G = self._clip_diag_probabilities(G)
+        if self.stable_projector_enforce:
+            G = self._enforce_projector(G)
+            G = self._enforce_hermiticity(G)
+        return G, xi
+
+    def _stable_step_batch(self, G_batch: Any, xi_step: Any) -> Any:
+        # Batch variant follows the same stable update order as the single-trajectory path.
+        G_batch = self._hamiltonian_step_batch(G_batch)
+        G_batch = self._measurement_step_batch(G_batch, xi_step, apply_projection=False)
+        G_batch = self._maybe_enforce_bdg_batch(G_batch)
+        G_batch = self._enforce_hermiticity_batch(G_batch)
+        G_batch = self._clip_diag_probabilities_batch(G_batch)
+        if self.stable_projector_enforce:
+            G_batch = self._enforce_projector_batch(G_batch)
+            G_batch = self._enforce_hermiticity_batch(G_batch)
+        return G_batch
+
+    def simulate_trajectory_batch(
+        self,
+        n_batch: int,
+        xi_batch: Any | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Simulate a batch of measurement trajectories in parallel.
+
+        Parameters
+        ----------
+        n_batch : int
+            Number of trajectories to simulate in this batch.
+        xi_batch : backend/NumPy array | None
+            Optional pre-generated ±1 measurement outcomes with shape
+            (n_batch, N_steps, L).
+        """
+        if n_batch < 1:
+            raise ValueError("n_batch must be at least 1")
+
+        if xi_batch is None:
+            xi_batch_dev = self.backend.choice_pm1((n_batch, self.N_steps, self.L))
+        else:
+            xi_batch_dev = self.backend.array(xi_batch)
+
+        G_batch = self.backend.zeros((n_batch, 2 * self.L, 2 * self.L), dtype=complex)
+        for idx in range(n_batch):
+            G_batch[idx] = self.G_initial
+
+        z_traj = np.zeros((n_batch, self.N_steps + 1, self.L), dtype=float)
+        xi_traj = np.zeros((n_batch, self.N_steps, self.L), dtype=int)
+        Q = np.zeros(n_batch, dtype=float)
+
+        z_traj[:, 0, :] = self._compute_z_values_batch(G_batch)
+
+        for step in range(self.N_steps):
+            z_before = z_traj[:, step, :]
+            xi_step = xi_batch_dev[:, step, :]
+            if self._stable_mode_active:
+                G_batch = self._stable_step_batch(G_batch, xi_step)
+            else:
+                G_batch = self._hamiltonian_step_batch(G_batch)
+                G_batch = self._measurement_step_batch(G_batch, xi_step)
+            xi_step_np = self.backend.asnumpy(xi_step).astype(int)
+            xi_traj[:, step, :] = xi_step_np
+
+            z_after = self._compute_z_values_batch(G_batch)
+            if self._stability_monitor is not None:
+                self._update_stability_monitor(G_batch[0])
+            z_traj[:, step + 1, :] = z_after
+
+            avg_z = 0.5 * (z_before + z_after)
+            Q += np.sum(2.0 * (self.epsilon ** 2) * z_before * avg_z, axis=1)
+            Q += np.sum(2.0 * self.epsilon * xi_step_np * avg_z, axis=1)
+
+        return Q, z_traj, xi_traj
 
     def simulate_trajectory(self) -> Tuple[float, np.ndarray, np.ndarray]:
         r"""Simulate a single measurement trajectory.
@@ -283,7 +662,7 @@ class LQubitCorrelationSimulator:
             Array of shape ``(N_steps, L)`` containing the ±1 measurement
             outcomes at each time step.
         """
-        G = self.G_initial.copy()
+        G = self.backend.copy(self.G_initial)
         z_traj = np.zeros((self.N_steps + 1, self.L), dtype=float)
         xi_traj = np.zeros((self.N_steps, self.L), dtype=int)
 
@@ -293,13 +672,16 @@ class LQubitCorrelationSimulator:
 
         for step in range(self.N_steps):
             z_before = z_traj[step]
+            if self._stable_mode_active:
+                G, xi = self._stable_step_single(G)
+            else:
+                # Hamiltonian evolution
+                G = self._hamiltonian_step(G)
 
-            # Hamiltonian evolution
-            G = self._hamiltonian_step(G)
-
-            # Measurement evolution
-            G, xi = self._measurement_step(G)
+                # Measurement evolution
+                G, xi = self._measurement_step(G)
             xi_traj[step] = xi
+            self._update_stability_monitor(G)
 
             # Compute magnetisation after the step
             z_after = self._compute_z_values(G)
@@ -326,21 +708,124 @@ class LQubitCorrelationSimulator:
         float
             Mean of z^2 over all sites and time steps.
         """
-        G = self.G_initial.copy()
+        G = self.backend.copy(self.G_initial)
 
         z = self._compute_z_values(G)
         sum_z2 = float(np.sum(z ** 2))
 
-        for _ in range(self.N_steps):
-            G = self._hamiltonian_step(G)
-            G, _ = self._measurement_step(G)
+        for step in range(self.N_steps):
+            if self._stable_mode_active:
+                G, _ = self._stable_step_single(G)
+            else:
+                G = self._hamiltonian_step(G)
+                G, _ = self._measurement_step(G)
+            self._update_stability_monitor(G)
             z = self._compute_z_values(G)
+            if not np.all(np.isfinite(z)):
+                return float("nan")
             sum_z2 += float(np.sum(z ** 2))
 
         total_samples = (self.N_steps + 1) * self.L
         return sum_z2 / total_samples
 
-    def simulate_ensemble(self, n_trajectories: int, progress: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def simulate_z2_mean_ensemble(
+        self,
+        n_trajectories: int,
+        batch_size: int | None = None,
+        return_std_err: bool = False,
+    ) -> float | tuple[float, float, float]:
+        r"""Compute mean z^2 over an ensemble without storing full trajectories.
+
+        This method is designed for long parameter sweeps where retaining full
+        trajectory tensors is unnecessary. It uses the batched trajectory update
+        path and backend RNG (`choice_pm1`), enabling fully device-side random
+        generation for GPU runs.
+
+        Parameters
+        ----------
+        n_trajectories : int
+            Number of independent trajectories to average.
+        batch_size : int | None, optional
+            Number of trajectories per batch. If ``None``, GPU uses
+            ``estimate_trajectory_batch_size(L)`` and CPU defaults to 1.
+        return_std_err : bool, optional
+            If ``True``, also return the sample standard deviation and standard
+            error of per-trajectory z^2 means.
+
+        Returns
+        -------
+        float | tuple[float, float, float]
+            Mean z^2 over trajectories. If ``return_std_err`` is true, returns
+            ``(mean, std, stderr)``.
+        """
+        if n_trajectories < 1:
+            raise ValueError("n_trajectories must be at least 1")
+
+        if batch_size is None:
+            if self.backend.is_gpu:
+                batch_size = min(n_trajectories, estimate_trajectory_batch_size(self.L))
+            else:
+                batch_size = 1
+        batch_size = max(1, int(batch_size))
+
+        samples_per_traj = (self.N_steps + 1) * self.L
+        mean_sum = 0.0
+        mean_sq_sum = 0.0
+        counted = 0
+
+        for start_idx in range(0, n_trajectories, batch_size):
+            end_idx = min(start_idx + batch_size, n_trajectories)
+            current_batch = end_idx - start_idx
+
+            G_batch = self.backend.zeros((current_batch, 2 * self.L, 2 * self.L), dtype=complex)
+            for idx in range(current_batch):
+                G_batch[idx] = self.G_initial
+
+            z_batch = self._compute_z_values_batch(G_batch)
+            if not np.all(np.isfinite(z_batch)):
+                if return_std_err:
+                    return float("nan"), float("nan"), float("nan")
+                return float("nan")
+            z2_sum = np.sum(z_batch ** 2, axis=1)
+
+            for step in range(self.N_steps):
+                xi_step = self.backend.choice_pm1((current_batch, self.L))
+                if self._stable_mode_active:
+                    G_batch = self._stable_step_batch(G_batch, xi_step)
+                else:
+                    G_batch = self._hamiltonian_step_batch(G_batch)
+                    G_batch = self._measurement_step_batch(G_batch, xi_step)
+                if self._stability_monitor is not None:
+                    self._update_stability_monitor(G_batch[0])
+                z_batch = self._compute_z_values_batch(G_batch)
+                if not np.all(np.isfinite(z_batch)):
+                    if return_std_err:
+                        return float("nan"), float("nan"), float("nan")
+                    return float("nan")
+                z2_sum += np.sum(z_batch ** 2, axis=1)
+
+            traj_means = z2_sum / samples_per_traj
+            mean_sum += float(np.sum(traj_means))
+            counted += current_batch
+
+            if return_std_err:
+                mean_sq_sum += float(np.sum(traj_means ** 2))
+
+        mean_z2 = mean_sum / max(counted, 1)
+        if not return_std_err:
+            return mean_z2
+
+        var = max((mean_sq_sum / max(counted, 1)) - (mean_z2 ** 2), 0.0)
+        std = float(np.sqrt(var))
+        stderr = std / float(np.sqrt(max(counted, 1)))
+        return mean_z2, std, stderr
+
+    def simulate_ensemble(
+        self,
+        n_trajectories: int,
+        progress: bool = False,
+        batch_size: int | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Simulate an ensemble of measurement trajectories.
 
         Parameters
@@ -366,20 +851,29 @@ class LQubitCorrelationSimulator:
         z_series = np.zeros((n_trajectories, self.N_steps + 1, self.L), dtype=float)
         xi_series = np.zeros((n_trajectories, self.N_steps, self.L), dtype=int)
 
+        if batch_size is None:
+            if self.backend.is_gpu:
+                batch_size = min(n_trajectories, estimate_trajectory_batch_size(self.L))
+            else:
+                batch_size = 1
+        batch_size = max(1, int(batch_size))
+
         if progress:
             try:
                 from tqdm import tqdm
-                iterator = tqdm(range(n_trajectories), desc="Simulating trajectories")
+                iterator = tqdm(range(0, n_trajectories, batch_size), desc="Simulating trajectories")
             except ImportError:
-                iterator = range(n_trajectories)
+                iterator = range(0, n_trajectories, batch_size)
         else:
-            iterator = range(n_trajectories)
+            iterator = range(0, n_trajectories, batch_size)
 
-        for idx in iterator:
-            Q, z_traj, xi_traj = self.simulate_trajectory()
-            Q_values[idx] = Q
-            z_series[idx] = z_traj
-            xi_series[idx] = xi_traj
+        for start_idx in iterator:
+            end_idx = min(start_idx + batch_size, n_trajectories)
+            current_batch = end_idx - start_idx
+            Q_batch, z_batch, xi_batch = self.simulate_trajectory_batch(current_batch)
+            Q_values[start_idx:end_idx] = Q_batch
+            z_series[start_idx:end_idx] = z_batch
+            xi_series[start_idx:end_idx] = xi_batch
 
         return Q_values, z_series, xi_series
 

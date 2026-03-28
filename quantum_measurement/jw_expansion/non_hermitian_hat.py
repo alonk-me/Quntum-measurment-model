@@ -60,8 +60,10 @@ production.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Any, Tuple
 import numpy as np
+
+from quantum_measurement.backends import Backend, get_backend
 
 
 @dataclass
@@ -104,12 +106,17 @@ class NonHermitianHatSimulator:
     dt: float = 0.0001
     N_steps: int = 10000
     closed_boundary: bool = False
+    device: str = "cpu"
+    backend: Backend | None = field(default=None, repr=False)
     # Derived quantities initialised post construction
     T_total: float = field(init=False)
-    h: np.ndarray = field(init=False, repr=False)
-    G_initial: np.ndarray = field(init=False, repr=False)
+    h: Any = field(init=False, repr=False)
+    G_initial: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.backend is None:
+            self.backend = get_backend(self.device)
+
         # Input validation
         if self.L < 1:
             raise ValueError("L must be at least 1")
@@ -142,11 +149,11 @@ class NonHermitianHatSimulator:
         # In the Nambu basis (c, c^†) the first L diagonal entries of G are
         # ⟨c_i^† c_i⟩ and the last L entries are ⟨c_i c_i^†⟩.  For the
         # vacuum one has ⟨c_i^† c_i⟩=0 and ⟨c_i c_i^†⟩=1.
-        self.G_initial = np.zeros((2 * self.L, 2 * self.L), dtype=complex)
+        self.G_initial = self.backend.zeros((2 * self.L, 2 * self.L), dtype=complex)
         for i in range(self.L, 2 * self.L):
             self.G_initial[i, i] = 1.0 + 0.0j
 
-    def _build_hamiltonian(self) -> np.ndarray:
+    def _build_hamiltonian(self) -> Any:
         """Construct the 2L×2L single‑particle Hamiltonian ``h``.
 
         The matrix has four L×L blocks.  The off–diagonal blocks encode
@@ -160,10 +167,10 @@ class NonHermitianHatSimulator:
         """
         L = self.L
         J = self.J
-        h11 = np.zeros((L, L), dtype=complex)
-        h12 = np.zeros((L, L), dtype=complex)
-        h21 = np.zeros((L, L), dtype=complex)
-        h22 = np.zeros((L, L), dtype=complex)
+        h11 = self.backend.zeros((L, L), dtype=complex)
+        h12 = self.backend.zeros((L, L), dtype=complex)
+        h21 = self.backend.zeros((L, L), dtype=complex)
+        h22 = self.backend.zeros((L, L), dtype=complex)
         # Fill off‑diagonal entries for nearest neighbours
         for i in range(L - 1):
             h11[i, i + 1] = -J
@@ -179,16 +186,20 @@ class NonHermitianHatSimulator:
             h21[i, j] = +J
             h22[i, j] = +J
         # Assemble full BdG matrix
-        top = np.hstack((h11, h12))
-        bottom = np.hstack((h21, h22))
-        return np.vstack((top, bottom))
+        top = self.backend.hstack((h11, h12))
+        bottom = self.backend.hstack((h21, h22))
+        return self.backend.vstack((top, bottom))
 
-    def _hamiltonian_step(self, G: np.ndarray) -> np.ndarray:
+    def _hamiltonian_step(self, G: Any) -> Any:
         """One Euler step of coherent (unitary) evolution under ``h``."""
-        comm = G @ self.h - self.h @ G
+        comm = self.backend.matmul(G, self.h) - self.backend.matmul(self.h, G)
         return G + (-2.0j * self.dt) * comm
 
-    def _nonhermitian_step(self, G: np.ndarray) -> np.ndarray:
+    def _hamiltonian_step_batch(self, G_batch: Any) -> Any:
+        """One Euler step of coherent evolution for a batch of states."""
+        return self.backend.batched_commutator_update(G_batch, self.h, self.dt)
+
+    def _nonhermitian_step(self, G: Any) -> Any:
         """One Euler step of imaginary‑potential evolution.
 
         The effective non‑Hermitian contribution ``-i γ/2 Σ n_j`` produces
@@ -197,29 +208,91 @@ class NonHermitianHatSimulator:
         where σ^z = diag{1,...,1,-1,...,-1} with L ones and L minus ones.
         """
         # Construct sigma_z = diag(1,...,1,-1,...,-1)
-        sigma_z = np.diag(np.concatenate([np.ones(self.L), -np.ones(self.L)]))
+        sigma_diag = np.concatenate([np.ones(self.L), -np.ones(self.L)])
+        sigma_z = self.backend.array(self.backend.diag(sigma_diag), dtype=complex)
         
         # Compute the update: δG = dt γ [(G σ^z G) - 1/2(σ^z G + G σ^z)]
-        term1 = G @ sigma_z @ G
-        term2 = 0.5 * (sigma_z @ G + G @ sigma_z)
+        term1 = self.backend.matmul(self.backend.matmul(G, sigma_z), G)
+        term2 = 0.5 * (self.backend.matmul(sigma_z, G) + self.backend.matmul(G, sigma_z))
         delta_G = self.dt * self.gamma * (term1 - term2)
         
         return G + delta_G
 
-    def _compute_n_values(self, G: np.ndarray) -> np.ndarray:
+    def _nonhermitian_step_batch(self, G_batch: Any) -> Any:
+        """One Euler step of imaginary-potential evolution for a batch."""
+        sigma_diag = np.concatenate([np.ones(self.L), -np.ones(self.L)])
+        sigma_z = self.backend.array(self.backend.diag(sigma_diag), dtype=complex)
+
+        term1 = self.backend.matmul(self.backend.matmul(G_batch, sigma_z), G_batch)
+        term2 = 0.5 * (self.backend.matmul(sigma_z, G_batch) + self.backend.matmul(G_batch, sigma_z))
+        delta_G = self.dt * self.gamma * (term1 - term2)
+
+        return G_batch + delta_G
+
+    def _compute_n_values(self, G: Any) -> np.ndarray:
         """Compute occupations ``⟨n_i⟩`` from the covariance matrix.
 
         The occupations are the real parts of the first L diagonal entries
         of ``G``.  They lie in [0,1] and measure the probability of
         finding a fermion at each site.
         """
-        return np.real(np.diag(G)[: self.L])
+        diag_real = self.backend.asnumpy(self.backend.real(self.backend.diag(G)))
+        return diag_real[: self.L]
+
+    def _compute_n_values_batch(self, G_batch: Any) -> np.ndarray:
+        """Compute occupations for a batch with shape (B, 2L, 2L)."""
+        diag_real = self.backend.real(G_batch[:, range(self.L), range(self.L)])
+        return self.backend.asnumpy(diag_real)
+
+    def simulate_trajectory_batch(
+        self,
+        n_batch: int,
+        return_G_final: bool = True,
+    ) -> Tuple[np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Propagate a batch of deterministic trajectories.
+
+        Parameters
+        ----------
+        n_batch : int
+            Number of trajectories to run in parallel.
+        return_G_final : bool, optional
+            If True, return final correlation matrices for each trajectory.
+        """
+        if n_batch < 1:
+            raise ValueError("n_batch must be at least 1")
+
+        dim = 2 * self.L
+        G_batch = self.backend.zeros((n_batch, dim, dim), dtype=complex)
+        for idx in range(n_batch):
+            G_batch[idx] = self.G_initial
+
+        n_traj = np.zeros((n_batch, self.N_steps + 1, self.L), dtype=float)
+        n_traj[:, 0, :] = self._compute_n_values_batch(G_batch)
+        Q = np.zeros(n_batch, dtype=float)
+
+        for step in range(self.N_steps):
+            n_before = n_traj[:, step, :]
+
+            G_batch = self._hamiltonian_step_batch(G_batch)
+            G_batch = self._nonhermitian_step_batch(G_batch)
+
+            G_batch = self.backend.symmetrize_clip_diag_inplace(G_batch)
+
+            n_after = self._compute_n_values_batch(G_batch)
+            n_traj[:, step + 1, :] = n_after
+
+            n_avg = 0.5 * (n_before + n_after)
+            Q += self.gamma * self.dt * np.sum(1.0 - 2 * n_avg, axis=1)
+
+        if return_G_final:
+            return Q, n_traj, self.backend.asnumpy(G_batch)
+        return Q, n_traj
 
     def simulate_trajectory(
         self, 
         return_G_final: bool = True
     ) -> Tuple[float, np.ndarray] | Tuple[float, np.ndarray, np.ndarray]:
-        """Propagate a single trajectory and compute entropy production.
+        r"""Propagate a single trajectory and compute entropy production.
 
         The correlation matrix is initialised to the vacuum and then
         updated for ``N_steps`` discrete time increments of size ``dt``.
@@ -254,7 +327,7 @@ class NonHermitianHatSimulator:
             evolution steps, representing the steady state. Only returned
             if return_G_final=True.
         """
-        G = self.G_initial.copy()
+        G = self.backend.copy(self.G_initial)
         n_traj = np.zeros((self.N_steps + 1, self.L), dtype=float)
         # initial occupations
         n_traj[0] = self._compute_n_values(G)
@@ -268,19 +341,21 @@ class NonHermitianHatSimulator:
             # Symmetrise and clip diagonal entries to preserve Hermiticity and
             # valid occupations.  Numerical integration may introduce small
             # anti‑hermitian components; symmetrisation suppresses them.
-            G = 0.5 * (G + G.conj().T)
-            diag = np.diag(G).copy()
-            diag_clipped = np.clip(np.real(diag), 0.0, 1.0)
+            G = 0.5 * (G + self.backend.conj(self.backend.transpose(G)))
+            diag = self.backend.real(self.backend.diag(G))
+            diag_clipped = self.backend.asnumpy(self.backend.clip(diag, 0.0, 1.0))
             for i in range(2 * self.L):
-                G[i, i] = diag_clipped[i] + 0.0j
+                G[i, i] = float(diag_clipped[i]) + 0.0j
             # compute occupations after update
             n_after = self._compute_n_values(G)
             n_traj[step + 1] = n_after
             # Stratonovich average for entropy production
             n_avg = 0.5 * (n_before + n_after)
             Q += self.gamma * self.dt * np.sum(1.0 - 2*n_avg)
+
+        G_out = self.backend.asnumpy(G)
         
         if return_G_final:
-            return Q, n_traj, G
+            return Q, n_traj, G_out
         else:
             return Q, n_traj

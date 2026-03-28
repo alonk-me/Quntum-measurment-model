@@ -174,7 +174,7 @@ python scripts/plot_progress.py --interval 15
 Virtual environment already created! Verify:
 
 ```bash
-cd /home/alon/Documents/VS_code/Quntum-measurment-model
+cd /Quntum-measurment-model
 source venv/bin/activate
 python -c "from quantum_measurement.jw_expansion.n_infty import sum_pbc; print('✓ Ready')"
 ```
