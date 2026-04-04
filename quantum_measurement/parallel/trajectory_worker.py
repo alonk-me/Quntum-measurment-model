@@ -38,6 +38,30 @@ class TrajectoryConfig:
     n_steps: int
     closed_boundary: bool
     n_particles: float | None = None
+    subsystem_sites: int | None = None
+    subsystem_start: int = 0
+
+
+def _resolve_subsystem_slice(config: TrajectoryConfig) -> tuple[int, int]:
+    """Resolve particle-sector subsystem [start, stop) used for entropy.
+
+    The entropy estimator in this worker uses the particle block of the correlation
+    matrix. Subsystem bounds are therefore interpreted in site indices of size L.
+    """
+    L = int(config.L)
+    start = int(config.subsystem_start)
+    n_sites = int(config.subsystem_sites) if config.subsystem_sites is not None else L
+
+    if L < 1:
+        raise ValueError("L must be >= 1")
+    if n_sites < 1 or n_sites > L:
+        raise ValueError("subsystem_sites must be in [1, L]")
+    if start < 0 or start >= L:
+        raise ValueError("subsystem_start must be in [0, L-1]")
+    if start + n_sites > L:
+        raise ValueError("subsystem slice exceeds particle-sector bounds")
+
+    return start, start + n_sites
 
 
 def build_hamiltonian(L: int, J: float, closed_boundary: bool) -> np.ndarray:
@@ -215,8 +239,10 @@ def run_single_trajectory(
     sigma_diag = np.concatenate([np.ones(L), -np.ones(L)]).astype(np.float64, copy=False)
     sigma_z = np.diag(sigma_diag).astype(np.complex128, copy=False)
 
+    a_start, a_stop = _resolve_subsystem_slice(config)
+
     S_A = np.zeros(config.n_steps + 1, dtype=np.float64)
-    S_A[0] = _entropy_from_eigvals(np.linalg.eigvalsh(C[:L, :L]))
+    S_A[0] = _entropy_from_eigvals(np.linalg.eigvalsh(C[a_start:a_stop, a_start:a_stop]))
 
     for step in range(config.n_steps):
         comm = C @ h - h @ C
@@ -232,7 +258,7 @@ def run_single_trajectory(
 
         C = _stabilize_C(C, n_particles, task.traj_id, step, L, config.gamma, logger)
 
-        eigvals_A = np.linalg.eigvalsh(C[:L, :L])
+        eigvals_A = np.linalg.eigvalsh(C[a_start:a_stop, a_start:a_stop])
         S_A[step + 1] = _entropy_from_eigvals(eigvals_A)
 
     return task.traj_id, S_A

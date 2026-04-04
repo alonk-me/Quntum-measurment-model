@@ -361,6 +361,7 @@ class MultiCpuBackend:
         self,
         total_trajectories: int,
         config: TrajectoryConfig,
+        progress_callback: Callable[[list[tuple[int, np.ndarray]], int, int], None] | None = None,
     ) -> tuple[list[tuple[int, np.ndarray]], dict[str, int]]:
         """Execute trajectory chunks across workers and return compact payload only."""
         if total_trajectories < 1:
@@ -378,7 +379,9 @@ class MultiCpuBackend:
             available_cores = _available_worker_cores(0)
         n_workers = max(1, min(self.config.max_workers, total_trajectories, len(available_cores)))
         worker_cores = available_cores[:n_workers]
-        chunk_size = (total_trajectories + n_workers - 1) // n_workers
+        # Use multiple waves of chunks so fast workers can keep pulling work.
+        target_chunks = max(n_workers * 4, n_workers)
+        chunk_size = max(1, total_trajectories // target_chunks)
         chunks = [tasks[i : i + chunk_size] for i in range(0, len(tasks), chunk_size)]
 
         ctx = mp.get_context("forkserver")
@@ -401,19 +404,25 @@ class MultiCpuBackend:
                 repo_root,
             ),
         ) as pool:
-            futures = [
-                pool.submit(
+            future_to_chunk_len = {}
+            futures = []
+            for chunk in chunks:
+                fut = pool.submit(
                     run_trajectory_chunk,
                     chunk,
                     config,
                     str(self.config.log_path) if self.config.log_path is not None else None,
                 )
-                for chunk in chunks
-            ]
+                futures.append(fut)
+                future_to_chunk_len[fut] = len(chunk)
 
-            for fut in futures:
+            completed_trajectories = 0
+            for fut in as_completed(futures):
                 chunk_out, counts = fut.result()
                 all_results.extend(chunk_out)
+                completed_trajectories += int(future_to_chunk_len.get(fut, len(chunk_out)))
+                if progress_callback is not None:
+                    progress_callback(chunk_out, completed_trajectories, total_trajectories)
                 for key, value in counts.items():
                     merged_counts[key] = merged_counts.get(key, 0) + int(value)
 
