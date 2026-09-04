@@ -39,6 +39,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import time
 import csv
+import os
 from datetime import datetime
 import sys
 import psutil
@@ -50,6 +51,7 @@ from quantum_measurement.jw_expansion.non_hermitian_hat import NonHermitianHatSi
 from quantum_measurement.jw_expansion.n_infty import sum_pbc, integral_expr
 from quantum_measurement.parallel import ParameterSweepExecutor
 from quantum_measurement.backends import MultiCpuBackend, MultiCpuBackendConfig
+from quantum_measurement.experiments import DEFAULT_REGISTRY, ExperimentRunOrchestrator, ExperimentStore
 
 # Configure matplotlib for publication-quality plots
 plt.rcParams['figure.dpi'] = 300
@@ -653,9 +655,46 @@ def main():
     parser.add_argument("--l-values", nargs="+", type=int, default=None)
     parser.add_argument("--gamma-values", nargs="+", type=float, default=None)
     parser.add_argument("--skip-plots", action="store_true")
+    parser.add_argument(
+        "--experiment-db-path",
+        type=str,
+        default=None,
+        help="SQLite experiment DB path (default: results/experiments.sqlite3 or QUANTUM_EXPERIMENT_DB_PATH).",
+    )
+    parser.add_argument(
+        "--disable-auto-monitor",
+        action="store_true",
+        help="Disable automatic live monitor process for this run.",
+    )
+    parser.add_argument(
+        "--monitor-interval",
+        type=int,
+        default=None,
+        help="Live monitor refresh interval in seconds.",
+    )
     args = parser.parse_args()
 
     csv_file = Path(args.output_csv)
+    store = ExperimentStore(args.experiment_db_path)
+    orchestrator = ExperimentRunOrchestrator(store, DEFAULT_REGISTRY.get("ninf_scan"))
+    requested_cores = int(args.n_workers) if args.n_workers is not None else int(os.cpu_count() or 1)
+    actual_cores = requested_cores
+    run_ctx = orchestrator.start_run(
+        config={
+            "script": "run_ninf_scan.py",
+            "args": vars(args),
+        },
+        resume_enabled=(not args.no_resume),
+        requested_cores=requested_cores,
+        actual_cores=actual_cores,
+        executor_kind=args.executor,
+        backend_device=args.device,
+        csv_path=str(csv_file),
+        event_log_path=None,
+        raw_series_enabled=True,
+        enable_monitor=(not args.disable_auto_monitor),
+        monitor_interval_seconds=args.monitor_interval,
+    )
 
     print("\n" + "="*80)
     print("QUANTUM MEASUREMENT MODEL: n_∞(γ) VERIFICATION")
@@ -679,21 +718,50 @@ def main():
             l_values_override=args.l_values,
             gamma_grid_override=args.gamma_values,
         )
+        orchestrator.finish_run(
+            run_id=run_ctx.run_id,
+            status="completed",
+            csv_path=csv_file,
+            event_log_path=None,
+            error_message=None,
+        )
         
         # Generate plots
         if not args.skip_plots:
             generate_verification_plots(csv_file)
+            for suffix in (
+                f"ninf_vs_g__BC-pbc__all-L__{csv_file.stem}.png",
+                f"error_analysis__{csv_file.stem}.png",
+                f"ninf_critical_region__g-near-1__{csv_file.stem}.png",
+            ):
+                plot_path = RESULTS_DIR / suffix
+                if plot_path.exists():
+                    store.add_artifact(run_ctx.run_id, "plot", plot_path, metadata={"experiment_type": "ninf_scan"})
         
         print("\n" + "="*80)
         print("✓ ALL TASKS COMPLETED SUCCESSFULLY")
         print("="*80)
         
     except KeyboardInterrupt:
+        orchestrator.finish_run(
+            run_id=run_ctx.run_id,
+            status="interrupted",
+            csv_path=csv_file,
+            event_log_path=None,
+            error_message="Interrupted by user",
+        )
         print("\n\n⚠ Interrupted by user (Ctrl+C)")
         print("Progress saved to CSV. Safe to resume later.")
         sys.exit(1)
         
     except Exception as e:
+        orchestrator.finish_run(
+            run_id=run_ctx.run_id,
+            status="failed",
+            csv_path=csv_file,
+            event_log_path=None,
+            error_message=str(e),
+        )
         print(f"\n\n✗ FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()

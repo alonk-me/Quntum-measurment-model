@@ -212,6 +212,21 @@ python -c "from sse_simulation.sse import SingleQubitSSE; print('SSE import OK')
 python -c "from krauss_operators.datatypes import InitialState; print('Kraus import OK')"
 ```
 
+### Experiment Infrastructure (SQLite-first)
+- Default experiment database: `results/experiments.sqlite3`
+- Override path with `--experiment-db-path` or env `QUANTUM_EXPERIMENT_DB_PATH`
+- Managed sweep scripts (`scripts/run_z2_scan.py`, `scripts/run_ninf_scan.py`) now:
+  - register runs and aggregate point outputs in SQLite
+  - keep raw CSV outputs for all runs
+  - auto-start a live monitor and clean its visual artifact on run completion
+
+Quick DB utilities:
+```bash
+python scripts/experiment_db_tools.py list-runs
+python scripts/experiment_db_tools.py export-points --run-id 1 --output-csv results/db_exports/run1.csv
+python scripts/experiment_db_tools.py plot-run --run-id 1
+```
+
 ### Code Structure
 - **`sse.py`** - Main SSE simulator class with discrete measurement protocol
 - **`krauss_operators_simulation.py`** - Discrete measurement functions and analysis

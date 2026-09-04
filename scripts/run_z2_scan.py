@@ -18,6 +18,7 @@ import csv
 import functools
 import hashlib
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -37,6 +38,7 @@ from quantum_measurement.jw_expansion.l_qubit_correlation_simulator import (
 )
 from quantum_measurement.parallel import ParameterSweepExecutor
 from quantum_measurement.backends import MultiCpuBackend, MultiCpuBackendConfig
+from quantum_measurement.experiments import DEFAULT_REGISTRY, ExperimentRunOrchestrator, ExperimentStore
 
 # ============================================================================
 # Configuration Parameters
@@ -1268,6 +1270,23 @@ def main():
         default="fail_on_nan",
         help="NaN policy: fail on first NaN point or finish full sweep with NaNs flagged.",
     )
+    parser.add_argument(
+        "--experiment-db-path",
+        type=str,
+        default=None,
+        help="SQLite experiment DB path (default: results/experiments.sqlite3 or QUANTUM_EXPERIMENT_DB_PATH).",
+    )
+    parser.add_argument(
+        "--disable-auto-monitor",
+        action="store_true",
+        help="Disable automatic live monitor process for this run.",
+    )
+    parser.add_argument(
+        "--monitor-interval",
+        type=int,
+        default=None,
+        help="Live monitor refresh interval in seconds.",
+    )
 
     args = parser.parse_args()
     _apply_adaptive_profile(args)
@@ -1311,46 +1330,93 @@ def main():
             return
 
     csv_file = Path(args.csv) if args.csv else DEFAULT_CSV
+    expected_event_log = None
+    if args.executor == "multi_cpu":
+        expected_event_log = Path(args.event_log) if args.event_log else csv_file.with_name(f"{csv_file.stem}_events.jsonl")
 
-    run_parameter_sweep(
-        csv_file,
-        backend_device=args.device,
-        parallel_backend=args.parallel_backend,
+    store = ExperimentStore(args.experiment_db_path)
+    orchestrator = ExperimentRunOrchestrator(store, DEFAULT_REGISTRY.get("z2_scan"))
+    requested_cores = int(args.n_workers) if args.n_workers is not None else int(os.cpu_count() or 1)
+    actual_cores = requested_cores
+    run_ctx = orchestrator.start_run(
+        config={
+            "script": "run_z2_scan.py",
+            "args": vars(args),
+            "phase_map_file": resolved_phase_map_file,
+        },
+        resume_enabled=(not args.no_resume),
+        requested_cores=requested_cores,
+        actual_cores=actual_cores,
         executor_kind=args.executor,
-        n_workers=args.n_workers,
-        base_seed=args.base_seed,
-        resume=(not args.no_resume),
-        l_values_override=args.l_values,
-        gamma_grid_override=args.gamma_values,
-        n_trajectories_per_point=args.n_trajectories_per_point,
-        batch_size_per_point=args.batch_size_per_point,
-        compute_uncertainty=args.compute_uncertainty,
-        use_stable_integrator=args.use_stable_integrator,
-        enable_stability_monitor=args.enable_stability_monitor,
-        t_multiplier=args.t_multiplier,
-        t_min=args.t_min,
-        dt_ratio=args.dt_ratio,
-        dt_max=args.dt_max,
-        dt_min=args.dt_min,
-        n_steps_min=args.n_steps_min,
-        n_steps_max=args.n_steps_max,
-        enable_phase_adaptation=args.enable_phase_adaptation,
-        phase_critical_g_min=args.phase_critical_g_min,
-        phase_critical_g_max=args.phase_critical_g_max,
-        phase_steps_mult_before=args.phase_steps_mult_before,
-        phase_steps_mult_critical=args.phase_steps_mult_critical,
-        phase_steps_mult_after=args.phase_steps_mult_after,
-        phase_time_mult_before=args.phase_time_mult_before,
-        phase_time_mult_critical=args.phase_time_mult_critical,
-        phase_time_mult_after=args.phase_time_mult_after,
-        noncritical_max_step_ratio=args.noncritical_max_step_ratio,
-        critical_max_step_ratio=args.critical_max_step_ratio,
-        phase_map_file=resolved_phase_map_file,
-        nan_mode=args.nan_mode,
-        event_log_path=args.event_log,
+        backend_device=args.device,
+        csv_path=str(csv_file),
+        event_log_path=str(expected_event_log) if expected_event_log is not None else None,
+        raw_series_enabled=True,
+        enable_monitor=(not args.disable_auto_monitor),
+        monitor_interval_seconds=args.monitor_interval,
     )
+
+    try:
+        run_parameter_sweep(
+            csv_file,
+            backend_device=args.device,
+            parallel_backend=args.parallel_backend,
+            executor_kind=args.executor,
+            n_workers=args.n_workers,
+            base_seed=args.base_seed,
+            resume=(not args.no_resume),
+            l_values_override=args.l_values,
+            gamma_grid_override=args.gamma_values,
+            n_trajectories_per_point=args.n_trajectories_per_point,
+            batch_size_per_point=args.batch_size_per_point,
+            compute_uncertainty=args.compute_uncertainty,
+            use_stable_integrator=args.use_stable_integrator,
+            enable_stability_monitor=args.enable_stability_monitor,
+            t_multiplier=args.t_multiplier,
+            t_min=args.t_min,
+            dt_ratio=args.dt_ratio,
+            dt_max=args.dt_max,
+            dt_min=args.dt_min,
+            n_steps_min=args.n_steps_min,
+            n_steps_max=args.n_steps_max,
+            enable_phase_adaptation=args.enable_phase_adaptation,
+            phase_critical_g_min=args.phase_critical_g_min,
+            phase_critical_g_max=args.phase_critical_g_max,
+            phase_steps_mult_before=args.phase_steps_mult_before,
+            phase_steps_mult_critical=args.phase_steps_mult_critical,
+            phase_steps_mult_after=args.phase_steps_mult_after,
+            phase_time_mult_before=args.phase_time_mult_before,
+            phase_time_mult_critical=args.phase_time_mult_critical,
+            phase_time_mult_after=args.phase_time_mult_after,
+            noncritical_max_step_ratio=args.noncritical_max_step_ratio,
+            critical_max_step_ratio=args.critical_max_step_ratio,
+            phase_map_file=resolved_phase_map_file,
+            nan_mode=args.nan_mode,
+            event_log_path=args.event_log,
+        )
+        orchestrator.finish_run(
+            run_id=run_ctx.run_id,
+            status="completed",
+            csv_path=csv_file,
+            event_log_path=expected_event_log,
+            error_message=None,
+        )
+    except Exception as exc:
+        orchestrator.finish_run(
+            run_id=run_ctx.run_id,
+            status="failed",
+            csv_path=csv_file,
+            event_log_path=expected_event_log,
+            error_message=str(exc),
+        )
+        raise
+
     if not args.skip_plots:
         generate_verification_plots(csv_file)
+        for suffix in ("_logscale.png", "_log10.png", "_runtime.png"):
+            plot_path = csv_file.parent / f"{csv_file.stem}{suffix}"
+            if plot_path.exists():
+                store.add_artifact(run_ctx.run_id, "plot", plot_path, metadata={"experiment_type": "z2_scan"})
 
 
 if __name__ == "__main__":
