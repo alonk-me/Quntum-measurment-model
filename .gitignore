@@ -16,3 +16,6 @@ rust/*
 *.out
 *.state
 logs/
+article-deliverables/*
+.last_z2*
+$NEW_RUNMETA
